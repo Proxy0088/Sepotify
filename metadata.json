@@ -1,0 +1,6 @@
+{
+  "name": "Spotify Stream & Offline Player",
+  "description": "پخش آنلاین و آفلاین سریع موزیک، ساخت پلی‌لیست شخصی، الگوریتم هوشمند پیشنهاد آهنگ و ویجت‌های سریع در محیطی شبیه به اسپاتیفای",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
