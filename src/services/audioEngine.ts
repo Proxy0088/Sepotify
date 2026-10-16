@@ -27,19 +27,19 @@ class AudioEngine {
       this.audio.volume = this.currentVolume;
 
       this.audio.addEventListener('loadedmetadata', () => {
-        if (this.audio && !this.currentTrack?.youtubeId && isFinite(this.audio.duration) && this.audio.duration > 0) {
+        if (this.audio && isFinite(this.audio.duration) && this.audio.duration > 0) {
           this.callbacks.onTimeUpdate(this.audio.currentTime, this.audio.duration);
         }
       });
 
       this.audio.addEventListener('durationchange', () => {
-        if (this.audio && !this.currentTrack?.youtubeId && isFinite(this.audio.duration) && this.audio.duration > 0) {
+        if (this.audio && isFinite(this.audio.duration) && this.audio.duration > 0) {
           this.callbacks.onTimeUpdate(this.audio.currentTime, this.audio.duration);
         }
       });
 
       this.audio.addEventListener('timeupdate', () => {
-        if (this.audio && !this.currentTrack?.youtubeId) {
+        if (this.audio) {
           const duration =
             isFinite(this.audio.duration) && this.audio.duration > 0
               ? this.audio.duration
@@ -49,37 +49,29 @@ class AudioEngine {
       });
 
       this.audio.addEventListener('play', () => {
-        if (!this.currentTrack?.youtubeId) {
-          this.callbacks.onPlayStateChange(true);
-        }
+        this.callbacks.onPlayStateChange(true);
       });
 
       this.audio.addEventListener('pause', () => {
-        if (!this.currentTrack?.youtubeId) {
-          this.callbacks.onPlayStateChange(false);
-        }
+        this.callbacks.onPlayStateChange(false);
       });
 
       this.audio.addEventListener('ended', () => {
-        if (!this.currentTrack?.youtubeId) {
-          this.callbacks.onPlayStateChange(false);
-          this.callbacks.onEnded();
-        }
+        this.callbacks.onPlayStateChange(false);
+        this.callbacks.onEnded();
       });
 
       this.audio.addEventListener('error', (e) => {
-        if (!this.currentTrack?.youtubeId) {
-          console.warn('Audio tag error:', e);
-          // If proxy stream failed, try direct src as fallback
-          if (this.audio && this.audio.src && this.audio.src.includes('/api/audio/stream') && this.currentTrack?.audioUrl) {
-            console.log('Falling back to direct audioUrl...');
-            this.audio.src = this.currentTrack.audioUrl;
-            this.audio.load();
-            this.audio.play().catch(() => {});
-            return;
-          }
-          this.callbacks.onError('خطا در پخش فایل صوتی');
+        console.warn('Audio tag error:', e);
+        // If proxy stream failed, try direct src as fallback
+        if (this.audio && this.audio.src && this.audio.src.includes('/api/audio/stream') && this.currentTrack?.audioUrl) {
+          console.log('Falling back to direct audioUrl...');
+          this.audio.src = this.currentTrack.audioUrl;
+          this.audio.load();
+          this.audio.play().catch(() => {});
+          return;
         }
+        this.callbacks.onError('خطا در پخش فایل صوتی');
       });
     }
   }
@@ -91,19 +83,6 @@ class AudioEngine {
   public async playTrack(track: Track): Promise<void> {
     this.currentTrack = track;
 
-    // If it's a YouTube track, HTML5 audio must NOT play
-    if (track.youtubeId) {
-      if (this.audio) {
-        this.audio.pause();
-        this.audio.removeAttribute('src');
-        this.audio.load();
-      }
-      // YouTube player component handles playback
-      this.callbacks.onPlayStateChange(true);
-      return;
-    }
-
-    // Standard catalog track or direct MP3
     if (!this.audio) return;
 
     try {
@@ -132,9 +111,7 @@ class AudioEngine {
   }
 
   public resume(): void {
-    if (this.currentTrack?.youtubeId) {
-      this.callbacks.onPlayStateChange(true);
-    } else if (this.audio && this.audio.src) {
+    if (this.audio && this.audio.src) {
       this.audio.play().catch((e) => {
         console.warn('Resume failed:', e);
       });
@@ -142,16 +119,14 @@ class AudioEngine {
   }
 
   public pause(): void {
-    if (this.currentTrack?.youtubeId) {
-      this.callbacks.onPlayStateChange(false);
-    } else if (this.audio) {
+    if (this.audio) {
       this.audio.pause();
     }
     this.callbacks.onPlayStateChange(false);
   }
 
   public seek(timeInSeconds: number): void {
-    if (!this.currentTrack?.youtubeId && this.audio && isFinite(this.audio.duration)) {
+    if (this.audio && isFinite(this.audio.duration)) {
       this.audio.currentTime = timeInSeconds;
     }
   }

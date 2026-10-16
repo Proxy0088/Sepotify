@@ -445,7 +445,7 @@ async function searchYouTubeMusic(query: string): Promise<{ tracks: any[]; usedP
 // 3. International Music Engine (Deezer API: Unblocked worldwide, great for Adele, Coldplay, Billie Eilish, etc.)
 function searchDeezerMusic(query: string): Promise<any[]> {
   return new Promise((resolve) => {
-    const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=8`;
+    const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=18`;
     const req = https.get(url, { timeout: 4000 }, (res) => {
       let data = '';
       res.on('data', (c) => (data += c));
@@ -684,15 +684,12 @@ app.get(['/api/search', '/api/youtube/search'], async (req, res) => {
   }
 
   try {
-    // Run full Persian music search, YouTube with auto-proxy, Deezer international, and iTunes in parallel
-    const [fullTracks, ytData, deezerTracks, previewTracks] = await Promise.all([
+    // Run full Persian music search, Deezer international, and iTunes in parallel (100% Pure Audio, 0% Video, No Bot Gate!)
+    const [fullTracks, deezerTracks, previewTracks] = await Promise.all([
       searchFullPersianMusic(query),
-      searchYouTubeMusic(query),
       searchDeezerMusic(query),
       searchUnblockedMusic(query),
     ]);
-
-    const youtubeTracks = ytData.tracks || [];
 
     // Unblocked direct results: prefer full tracks, then Deezer international, then iTunes previews
     const directResults =
@@ -702,11 +699,10 @@ app.get(['/api/search', '/api/youtube/search'], async (req, res) => {
         ? deezerTracks
         : previewTracks;
 
-    // Combined list: Full complete tracks first, then Deezer international, then YouTube, then previews
+    // Combined list: Full complete tracks first, then Deezer international, then previews
     const combined = [
       ...fullTracks,
       ...deezerTracks,
-      ...youtubeTracks,
       ...(fullTracks.length === 0 && deezerTracks.length === 0 ? previewTracks : []),
     ];
 
@@ -714,17 +710,17 @@ app.get(['/api/search', '/api/youtube/search'], async (req, res) => {
       results: combined,
       fullTracks,
       directResults,
-      youtubeResults: youtubeTracks,
+      youtubeResults: [],
       deezerResults: deezerTracks,
       previewResults: previewTracks,
       query,
       fullCount: fullTracks.length,
       unblockedCount: directResults.length,
-      youtubeCount: youtubeTracks.length,
+      youtubeCount: 0,
       deezerCount: deezerTracks.length,
       youtubeStatus: {
-        isBlocked: ytData.isBlocked,
-        usedProxy: ytData.usedProxy,
+        isBlocked: false,
+        usedProxy: null,
       },
     });
   } catch (err: any) {

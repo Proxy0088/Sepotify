@@ -60,7 +60,6 @@ import { MiniPlayer } from './components/MiniPlayer';
 import { NowPlayingSheet } from './components/NowPlayingSheet';
 import { CreatePlaylistModal } from './components/CreatePlaylistModal';
 import { TestingGuideModal } from './components/TestingGuideModal';
-import { YouTubeAudioPlayer } from './components/YouTubeAudioPlayer';
 import { NetworkProxyModal } from './components/NetworkProxyModal';
 
 export default function App() {
@@ -283,24 +282,16 @@ export default function App() {
       }
       return;
     }
-    if (currentTrack.youtubeId) {
-      setIsPlaying((prev) => !prev);
+    if (isPlaying) {
+      audioEngine.pause();
     } else {
-      if (isPlaying) {
-        audioEngine.pause();
-      } else {
-        audioEngine.resume();
-      }
+      audioEngine.resume();
     }
   };
 
   const handleSeek = (time: number) => {
     setCurrentTime(time);
-    if (currentTrack?.youtubeId) {
-      setSeekTarget(time);
-    } else {
-      audioEngine.seek(time);
-    }
+    audioEngine.seek(time);
   };
 
   const handleNextTrack = () => {
@@ -789,7 +780,7 @@ export default function App() {
                               : 'liquid-glass text-white/60 hover:text-white'
                           }`}
                         >
-                          همه نتایج ({fullTracks.length + deezerResults.length + directResults.length + youtubeResults.length})
+                          همه آهنگ‌ها ({fullTracks.length + deezerResults.length + directResults.length})
                         </button>
                         {fullTracks.length > 0 && (
                           <button
@@ -800,7 +791,7 @@ export default function App() {
                                 : 'liquid-glass text-[#1ed760] hover:bg-[#1ed760]/10 border border-[#1ed760]/30'
                             }`}
                           >
-                            <span>🎵 آهنگ‌های کامل ۳۲۰</span>
+                            <span>🎵 آهنگ‌های کامل ۳۲۰kbps</span>
                             <span className="font-mono text-[11px]">({fullTracks.length})</span>
                           </button>
                         )}
@@ -813,21 +804,10 @@ export default function App() {
                                 : 'liquid-glass text-cyan-400 hover:bg-cyan-500/10 border border-cyan-500/30'
                             }`}
                           >
-                            <span>🌍 موزیک‌های بین‌المللی</span>
+                            <span>🌍 آهنگ‌های بین‌المللی (خارجی)</span>
                             <span className="font-mono text-[11px]">({deezerResults.length})</span>
                           </button>
                         )}
-                        <button
-                          onClick={() => setActiveSourceFilter('youtube')}
-                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full font-semibold transition-all whitespace-nowrap ${
-                            activeSourceFilter === 'youtube'
-                              ? 'bg-red-600 text-white shadow-md'
-                              : 'liquid-glass text-red-400 hover:bg-red-600/10 border border-red-500/30'
-                          }`}
-                        >
-                          <span>🔴 یوتیوب</span>
-                          <span className="font-mono text-[11px]">({youtubeResults.length})</span>
-                        </button>
                       </div>
                     )}
 
@@ -839,13 +819,13 @@ export default function App() {
                             <span className="p-1 rounded bg-[#1ed760] text-black font-extrabold text-xs">
                               🎵
                             </span>
-                            <span>آهنگ‌های کامل (پخش ۱۰۰٪ کامل و بدون فیلترشکن)</span>
+                            <span>آهنگ‌های کامل ۳۲۰kbps (پخش ۱۰۰٪ صوتی و بدون قطعی)</span>
                             {isSearchingMusic && fullTracks.length === 0 && (
                               <Loader2 className="w-4 h-4 text-[#1ed760] animate-spin mr-2" />
                             )}
                           </h3>
                           <span className="text-[11px] text-[#1ed760] font-medium hidden sm:inline">
-                            کیفیت ۳۲۰kbps کامل - بدون نصفه شدن
+                            کیفیت ۳۲۰kbps استودیو - فایل صوتی مستقیم
                           </span>
                         </div>
 
@@ -886,13 +866,13 @@ export default function App() {
                             <span className="p-1 rounded bg-cyan-500 text-black font-extrabold text-xs">
                               <Globe className="w-4 h-4" />
                             </span>
-                            <span>آهنگ‌های بین‌المللی و خارجی (بدون نیاز به فیلترشکن)</span>
+                            <span>آهنگ‌های بین‌المللی و خارجی (صوتی خالص - بدون ویدیو)</span>
                             {isSearchingMusic && deezerResults.length === 0 && (
                               <Loader2 className="w-4 h-4 text-cyan-400 animate-spin mr-2" />
                             )}
                           </h3>
                           <span className="text-[11px] text-cyan-400 font-medium hidden sm:inline">
-                            آرشیو جهانی Deezer (پخش مستقیم و باکیفیت)
+                            پخش مستقیم صوتی با بالاترین کیفیت
                           </span>
                         </div>
 
@@ -946,81 +926,6 @@ export default function App() {
                             />
                           ))}
                         </div>
-                      </div>
-                    )}
-
-                    {/* Section 4: YouTube Search Results Section (With Local VPN / TUN Mode Guide) */}
-                    {searchQuery && (activeSourceFilter === 'all' || activeSourceFilter === 'youtube') && (
-                      <div className="liquid-glass p-4 rounded-[16px] border border-red-500/20 shadow-xl">
-                        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                          <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-                            <span className="p-1 rounded bg-red-600 text-white">
-                              <Youtube className="w-4 h-4" />
-                            </span>
-                            <span>ویدیو و موزیک‌های یوتیوب</span>
-                            {youtubeResults.length > 0 && (
-                              <span className="text-[10px] bg-[#1ed760]/20 text-[#1ed760] border border-[#1ed760]/30 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                                <span className="w-1.5 h-1.5 rounded-full bg-[#1ed760] animate-pulse" />
-                                <span>متصل {youtubeStatus.usedProxy ? `(از طریق پروکسی ${youtubeStatus.usedProxy})` : ''}</span>
-                              </span>
-                            )}
-                            {isSearchingMusic && youtubeResults.length === 0 && (
-                              <Loader2 className="w-4 h-4 text-red-400 animate-spin mr-2" />
-                            )}
-                          </h3>
-
-                          <button
-                            onClick={() => setIsNetworkModalOpen(true)}
-                            className="text-[11px] text-red-400 hover:text-red-300 flex items-center gap-1 bg-red-500/10 hover:bg-red-500/20 px-2.5 py-1 rounded-lg border border-red-500/30 transition-colors"
-                          >
-                            <Shield className="w-3 h-3" />
-                            <span>راهنمای اتصال v2ray در سیستم</span>
-                          </button>
-                        </div>
-
-                        {youtubeResults.length > 0 ? (
-                          <div className="space-y-1.5">
-                            {youtubeResults.map((ytTrack, i) => (
-                              <TrackRow
-                                key={ytTrack.id}
-                                track={ytTrack}
-                                index={i}
-                                isCurrent={currentTrack?.youtubeId === ytTrack.youtubeId}
-                                isPlaying={isPlaying}
-                                isLiked={likedTrackIds.includes(ytTrack.id)}
-                                isDownloaded={downloadedIdSet.has(ytTrack.id)}
-                                onPlay={(t) => handlePlayTrack(t, youtubeResults)}
-                                onToggleLike={handleToggleLike}
-                                onToggleDownload={handleToggleDownload}
-                              />
-                            ))}
-                          </div>
-                        ) : isSearchingMusic ? (
-                          <div className="py-6 text-center text-[#b3b3b3] text-xs">
-                            در حال جستجو در میان آهنگ‌های یوتیوب با پروکسی هوشمند...
-                          </div>
-                        ) : (
-                          <div className="p-4 rounded-xl bg-black/40 border border-white/10 text-xs space-y-2.5">
-                            <div className="flex items-start gap-2.5 text-amber-300">
-                              <Shield className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                              <div className="space-y-1">
-                                <p className="font-bold">چرا وقتی فیلترشکن در کامپیوترتان روشن است، یوتیوب خالی است؟</p>
-                                <p className="text-white/70 text-[11px] leading-relaxed">
-                                  در ویندوز نرم‌افزارهای V2Ray فقط پروکسی مرورگر را ست می‌کنند و ترمینال Node.js ترافیکش را مستقیم می‌فرستد. برای حل فوری این موضوع کافیست در <strong>v2rayN</strong> گزینه <strong>حالت TUN (TUN Mode)</strong> را روشن کنید یا پورت پروکسی را در دکمه زیر تنظیم نمایید.
-                                </p>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2 pt-1">
-                              <button
-                                onClick={() => setIsNetworkModalOpen(true)}
-                                className="px-3.5 py-1.5 rounded-xl bg-[#1ed760] text-black font-bold text-xs flex items-center gap-1.5 shadow-md hover:scale-105 active:scale-95 transition-transform"
-                              >
-                                <Shield className="w-3.5 h-3.5" />
-                                <span>تنظیم خودکار پورت پروکسی و راهنما</span>
-                              </button>
-                            </div>
-                          </div>
-                        )}
                       </div>
                     )}
 
@@ -1326,26 +1231,6 @@ export default function App() {
             onSelectQueueTrack={(t) => handlePlayTrack(t)}
           />
         )}
-
-        {/* YouTube Dedicated Audio/Video Player */}
-        <YouTubeAudioPlayer
-          currentTrack={currentTrack}
-          isPlaying={isPlaying}
-          volume={volume}
-          seekTime={seekTarget}
-          onTimeUpdate={(cur, dur) => {
-            setCurrentTime(cur);
-            setDuration(dur);
-            setSeekTarget(null);
-          }}
-          onPlayStateChange={(playing) => {
-            setIsPlaying(playing);
-          }}
-          onEnded={() => {
-            handleNextTrack();
-          }}
-          isSheetOpen={isNowPlayingOpen}
-        />
 
         {/* Modals */}
         <CreatePlaylistModal
