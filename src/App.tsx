@@ -22,6 +22,8 @@ import {
   Youtube,
   Loader2,
   Tv,
+  Shield,
+  Globe,
 } from 'lucide-react';
 import { Track, Playlist, Genre } from './types/music';
 import {
@@ -59,6 +61,7 @@ import { NowPlayingSheet } from './components/NowPlayingSheet';
 import { CreatePlaylistModal } from './components/CreatePlaylistModal';
 import { TestingGuideModal } from './components/TestingGuideModal';
 import { YouTubeAudioPlayer } from './components/YouTubeAudioPlayer';
+import { NetworkProxyModal } from './components/NetworkProxyModal';
 
 export default function App() {
   // Navigation State
@@ -72,9 +75,14 @@ export default function App() {
   const [fullTracks, setFullTracks] = useState<Track[]>([]);
   const [directResults, setDirectResults] = useState<Track[]>([]);
   const [youtubeResults, setYoutubeResults] = useState<Track[]>([]);
+  const [deezerResults, setDeezerResults] = useState<Track[]>([]);
   const [previewResults, setPreviewResults] = useState<Track[]>([]);
   const [isSearchingMusic, setIsSearchingMusic] = useState(false);
-  const [activeSourceFilter, setActiveSourceFilter] = useState<'all' | 'full' | 'direct' | 'youtube'>('all');
+  const [activeSourceFilter, setActiveSourceFilter] = useState<'all' | 'full' | 'deezer' | 'direct' | 'youtube'>('all');
+  const [youtubeStatus, setYoutubeStatus] = useState<{ isBlocked: boolean; usedProxy: string | null }>({
+    isBlocked: false,
+    usedProxy: null,
+  });
 
   // Playlists & Selection
   const [customPlaylists, setCustomPlaylists] = useState<Playlist[]>([]);
@@ -100,6 +108,7 @@ export default function App() {
   const [isNowPlayingOpen, setIsNowPlayingOpen] = useState(false);
   const [isCreatePlaylistOpen, setIsCreatePlaylistOpen] = useState(false);
   const [isTestingGuideOpen, setIsTestingGuideOpen] = useState(false);
+  const [isNetworkModalOpen, setIsNetworkModalOpen] = useState(false);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
   const [isMobileFrame, setIsMobileFrame] = useState(false);
 
@@ -147,12 +156,43 @@ export default function App() {
     });
   }, []);
 
+  // Client-Side Zero-Config VPN & YouTube Auto-Detection (Mobile & Desktop)
+  const [isVpnDetected, setIsVpnDetected] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    const checkVpn = () => {
+      const img = new Image();
+      const timer = setTimeout(() => {
+        if (isMounted) setIsVpnDetected(false);
+      }, 2500);
+
+      img.onload = () => {
+        clearTimeout(timer);
+        if (isMounted) setIsVpnDetected(true);
+      };
+      img.onerror = () => {
+        clearTimeout(timer);
+        if (isMounted) setIsVpnDetected(false);
+      };
+      img.src = `https://www.youtube.com/favicon.ico?_=${Date.now()}`;
+    };
+
+    checkVpn();
+    const interval = setInterval(checkVpn, 15000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   // Unified Multi-Engine Live Search integration
   useEffect(() => {
     if (!searchQuery.trim() || searchQuery.trim().length < 2) {
       setFullTracks([]);
       setDirectResults([]);
       setYoutubeResults([]);
+      setDeezerResults([]);
       setPreviewResults([]);
       setIsSearchingMusic(false);
       return;
@@ -166,7 +206,11 @@ export default function App() {
         setFullTracks(data.fullTracks || []);
         setDirectResults(data.directResults || []);
         setYoutubeResults(data.youtubeResults || []);
+        setDeezerResults(data.deezerResults || []);
         setPreviewResults(data.previewResults || []);
+        if (data.youtubeStatus) {
+          setYoutubeStatus(data.youtubeStatus);
+        }
       } catch (e) {
         console.warn('Search request error:', e);
       } finally {
@@ -420,6 +464,8 @@ export default function App() {
           isMobileFrame={isMobileFrame}
           onToggleMobileFrame={() => setIsMobileFrame((v) => !v)}
           onOpenTestingGuide={() => setIsTestingGuideOpen(true)}
+          onOpenNetworkProxy={() => setIsNetworkModalOpen(true)}
+          isVpnDetected={isVpnDetected}
           onBack={handleBack}
           onForward={handleForward}
           canBack={historyIndex > 0 || !!activePlaylist || !!selectedArtist}
@@ -743,7 +789,7 @@ export default function App() {
                               : 'liquid-glass text-white/60 hover:text-white'
                           }`}
                         >
-                          همه نتایج ({fullTracks.length + directResults.length + youtubeResults.length})
+                          همه نتایج ({fullTracks.length + deezerResults.length + directResults.length + youtubeResults.length})
                         </button>
                         {fullTracks.length > 0 && (
                           <button
@@ -756,6 +802,19 @@ export default function App() {
                           >
                             <span>🎵 آهنگ‌های کامل ۳۲۰</span>
                             <span className="font-mono text-[11px]">({fullTracks.length})</span>
+                          </button>
+                        )}
+                        {deezerResults.length > 0 && (
+                          <button
+                            onClick={() => setActiveSourceFilter('deezer')}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full font-semibold transition-all whitespace-nowrap ${
+                              activeSourceFilter === 'deezer'
+                                ? 'bg-cyan-500 text-black shadow-md'
+                                : 'liquid-glass text-cyan-400 hover:bg-cyan-500/10 border border-cyan-500/30'
+                            }`}
+                          >
+                            <span>🌍 موزیک‌های بین‌المللی</span>
+                            <span className="font-mono text-[11px]">({deezerResults.length})</span>
                           </button>
                         )}
                         <button
@@ -819,8 +878,45 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Section 2: Direct / Preview Results if any (Fallback when no full track) */}
-                    {searchQuery && (activeSourceFilter === 'all' || activeSourceFilter === 'direct') && fullTracks.length === 0 && directResults.length > 0 && (
+                    {/* Section 2: International Music (Deezer - Guaranteed unblocked for English songs!) */}
+                    {searchQuery && (activeSourceFilter === 'all' || activeSourceFilter === 'deezer') && deezerResults.length > 0 && (
+                      <div className="liquid-glass p-4 rounded-[16px] border border-cyan-500/30 shadow-xl relative overflow-hidden">
+                        <div className="flex items-center justify-between mb-3">
+                          <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span className="p-1 rounded bg-cyan-500 text-black font-extrabold text-xs">
+                              <Globe className="w-4 h-4" />
+                            </span>
+                            <span>آهنگ‌های بین‌المللی و خارجی (بدون نیاز به فیلترشکن)</span>
+                            {isSearchingMusic && deezerResults.length === 0 && (
+                              <Loader2 className="w-4 h-4 text-cyan-400 animate-spin mr-2" />
+                            )}
+                          </h3>
+                          <span className="text-[11px] text-cyan-400 font-medium hidden sm:inline">
+                            آرشیو جهانی Deezer (پخش مستقیم و باکیفیت)
+                          </span>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          {deezerResults.map((track, i) => (
+                            <TrackRow
+                              key={track.id}
+                              track={track}
+                              index={i}
+                              isCurrent={currentTrack?.id === track.id}
+                              isPlaying={isPlaying}
+                              isLiked={likedTrackIds.includes(track.id)}
+                              isDownloaded={downloadedIdSet.has(track.id)}
+                              onPlay={(t) => handlePlayTrack(t, deezerResults)}
+                              onToggleLike={handleToggleLike}
+                              onToggleDownload={handleToggleDownload}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Section 3: Fallback Previews (Apple Music) */}
+                    {searchQuery && (activeSourceFilter === 'all' || activeSourceFilter === 'direct') && fullTracks.length === 0 && deezerResults.length === 0 && directResults.length > 0 && (
                       <div className="liquid-glass p-4 rounded-[16px] border border-white/10 shadow-xl relative overflow-hidden">
                         <div className="flex items-center justify-between mb-3">
                           <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
@@ -853,22 +949,33 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Section 3: YouTube Search Results Section (With VPN) */}
+                    {/* Section 4: YouTube Search Results Section (With Local VPN / TUN Mode Guide) */}
                     {searchQuery && (activeSourceFilter === 'all' || activeSourceFilter === 'youtube') && (
                       <div className="liquid-glass p-4 rounded-[16px] border border-red-500/20 shadow-xl">
-                        <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                           <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
                             <span className="p-1 rounded bg-red-600 text-white">
                               <Youtube className="w-4 h-4" />
                             </span>
-                            <span>ویدیو و موزیک‌های یوتیوب (نیاز به فیلترشکن)</span>
+                            <span>ویدیو و موزیک‌های یوتیوب</span>
+                            {youtubeResults.length > 0 && (
+                              <span className="text-[10px] bg-[#1ed760]/20 text-[#1ed760] border border-[#1ed760]/30 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#1ed760] animate-pulse" />
+                                <span>متصل {youtubeStatus.usedProxy ? `(از طریق پروکسی ${youtubeStatus.usedProxy})` : ''}</span>
+                              </span>
+                            )}
                             {isSearchingMusic && youtubeResults.length === 0 && (
                               <Loader2 className="w-4 h-4 text-red-400 animate-spin mr-2" />
                             )}
                           </h3>
-                          <span className="text-[11px] text-[#b3b3b3] hidden sm:inline">
-                            اگر فیلترشکن خاموش است، از بخش سبز بالا استفاده کنید
-                          </span>
+
+                          <button
+                            onClick={() => setIsNetworkModalOpen(true)}
+                            className="text-[11px] text-red-400 hover:text-red-300 flex items-center gap-1 bg-red-500/10 hover:bg-red-500/20 px-2.5 py-1 rounded-lg border border-red-500/30 transition-colors"
+                          >
+                            <Shield className="w-3 h-3" />
+                            <span>راهنمای اتصال v2ray در سیستم</span>
+                          </button>
                         </div>
 
                         {youtubeResults.length > 0 ? (
@@ -890,11 +997,28 @@ export default function App() {
                           </div>
                         ) : isSearchingMusic ? (
                           <div className="py-6 text-center text-[#b3b3b3] text-xs">
-                            در حال جستجو در میان آهنگ‌های یوتیوب...
+                            در حال جستجو در میان آهنگ‌های یوتیوب با پروکسی هوشمند...
                           </div>
                         ) : (
-                          <div className="py-4 text-center text-[#b3b3b3] text-xs">
-                            در صورت خاموش بودن فیلترشکن در ایران، آهنگ‌های بخش «آهنگ‌های کامل» بالا بدون مشکل پخش می‌شوند.
+                          <div className="p-4 rounded-xl bg-black/40 border border-white/10 text-xs space-y-2.5">
+                            <div className="flex items-start gap-2.5 text-amber-300">
+                              <Shield className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                              <div className="space-y-1">
+                                <p className="font-bold">چرا وقتی فیلترشکن در کامپیوترتان روشن است، یوتیوب خالی است؟</p>
+                                <p className="text-white/70 text-[11px] leading-relaxed">
+                                  در ویندوز نرم‌افزارهای V2Ray فقط پروکسی مرورگر را ست می‌کنند و ترمینال Node.js ترافیکش را مستقیم می‌فرستد. برای حل فوری این موضوع کافیست در <strong>v2rayN</strong> گزینه <strong>حالت TUN (TUN Mode)</strong> را روشن کنید یا پورت پروکسی را در دکمه زیر تنظیم نمایید.
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                onClick={() => setIsNetworkModalOpen(true)}
+                                className="px-3.5 py-1.5 rounded-xl bg-[#1ed760] text-black font-bold text-xs flex items-center gap-1.5 shadow-md hover:scale-105 active:scale-95 transition-transform"
+                              >
+                                <Shield className="w-3.5 h-3.5" />
+                                <span>تنظیم خودکار پورت پروکسی و راهنما</span>
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1254,6 +1378,26 @@ export default function App() {
           isOfflineMode={isOfflineMode}
           onToggleMobileFrame={() => setIsMobileFrame((v) => !v)}
           isMobileFrame={isMobileFrame}
+        />
+
+        <NetworkProxyModal
+          isOpen={isNetworkModalOpen}
+          onClose={() => setIsNetworkModalOpen(false)}
+          onProxyUpdated={() => {
+            // Trigger a search refresh if a query is active
+            if (searchQuery.trim().length >= 2) {
+              fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`)
+                .then((r) => r.json())
+                .then((data) => {
+                  setFullTracks(data.fullTracks || []);
+                  setDirectResults(data.directResults || []);
+                  setYoutubeResults(data.youtubeResults || []);
+                  setDeezerResults(data.deezerResults || []);
+                  if (data.youtubeStatus) setYoutubeStatus(data.youtubeStatus);
+                })
+                .catch(() => {});
+            }
+          }}
         />
       </div>
     </div>

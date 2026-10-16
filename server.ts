@@ -2,12 +2,145 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import https from 'https';
 import http from 'http';
+import net from 'net';
 import path from 'path';
+import { exec } from 'child_process';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 const app = express();
 const port = parseInt(process.env.PORT || '3000', 10);
 
 app.use(express.json());
+
+// Proxy configuration state for Iran local development & YouTube routing
+let configuredProxyUrl: string | null =
+  process.env.HTTPS_PROXY ||
+  process.env.HTTP_PROXY ||
+  process.env.ALL_PROXY ||
+  null;
+let lastDetectedProxy: string | null = null;
+
+// Standard local proxy ports used by Iranian users for V2Ray / Clash / Nekoray
+const COMMON_LOCAL_PROXIES = [
+  { name: 'v2rayN HTTP', port: 10809, protocol: 'http' },
+  { name: 'Clash / Clash Verge', port: 7890, protocol: 'http' },
+  { name: 'Nekoray HTTP', port: 2081, protocol: 'http' },
+  { name: 'v2rayN Alternative', port: 10808, protocol: 'http' },
+  { name: 'Nekoray Alternative', port: 2080, protocol: 'http' },
+];
+
+// Fast probe to check if a local port is actively open on 127.0.0.1
+function probePort(portNum: number, host = '127.0.0.1', timeoutMs = 250): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('timeout', () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once('error', () => {
+      resolve(false);
+    });
+    try {
+      socket.connect(portNum, host);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+// 1. Read Windows System Proxy from Registry (Zero-Config: automatically detects when v2rayN / Clash is toggled ON in Windows)
+function getWindowsSystemProxy(): Promise<string | null> {
+  if (process.platform !== 'win32') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    exec('reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"', { timeout: 800 }, (err, stdout) => {
+      if (err || !stdout) return resolve(null);
+      const isEnabled = /ProxyEnable\s+REG_DWORD\s+0x1/i.test(stdout);
+      if (!isEnabled) return resolve(null);
+
+      const match = stdout.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
+      if (match && match[1]) {
+        let server = match[1].trim();
+        if (server.includes('https=')) {
+          const httpsMatch = server.match(/https=([^;]+)/);
+          if (httpsMatch) server = httpsMatch[1];
+        } else if (server.includes('http=')) {
+          const httpMatch = server.match(/http=([^;]+)/);
+          if (httpMatch) server = httpMatch[1];
+        }
+        if (!server.startsWith('http://') && !server.startsWith('socks5://')) {
+          server = `http://${server}`;
+        }
+        resolve(server);
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+// 2. Read macOS System Proxy (Zero-Config on macOS)
+function getMacSystemProxy(): Promise<string | null> {
+  if (process.platform !== 'darwin') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    exec('scutil --proxy', { timeout: 800 }, (err, stdout) => {
+      if (err || !stdout) return resolve(null);
+      const isEnabled = /HTTPEnable\s*:\s*1/i.test(stdout);
+      const hostMatch = stdout.match(/HTTPProxy\s*:\s*([^\s]+)/i);
+      const portMatch = stdout.match(/HTTPPort\s*:\s*([0-9]+)/i);
+      if (isEnabled && hostMatch && portMatch) {
+        resolve(`http://${hostMatch[1]}:${portMatch[1]}`);
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+// Auto-detect any active local proxy with multi-tier discovery
+async function getEffectiveProxy(): Promise<string | null> {
+  if (configuredProxyUrl) {
+    return configuredProxyUrl;
+  }
+
+  // Tier 1: Check Windows / macOS native system proxy
+  const winProxy = await getWindowsSystemProxy();
+  if (winProxy) {
+    lastDetectedProxy = winProxy;
+    return winProxy;
+  }
+
+  const macProxy = await getMacSystemProxy();
+  if (macProxy) {
+    lastDetectedProxy = macProxy;
+    return macProxy;
+  }
+
+  // Tier 2: Check standard environment variables
+  const envProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.ALL_PROXY;
+  if (envProxy) {
+    lastDetectedProxy = envProxy;
+    return envProxy;
+  }
+
+  // Tier 3: Probe common local proxy ports on 127.0.0.1 in parallel
+  const probes = COMMON_LOCAL_PROXIES.map(async (p) => {
+    const isOpen = await probePort(p.port);
+    return isOpen ? `http://127.0.0.1:${p.port}` : null;
+  });
+  const results = await Promise.all(probes);
+  const found = results.find(Boolean);
+  if (found) {
+    lastDetectedProxy = found;
+    return found;
+  }
+
+  return null;
+}
 
 // Persian artist transliteration map for better unblocked searches
 const PERSIAN_ARTIST_MAP: Record<string, string> = {
@@ -184,22 +317,27 @@ async function searchFullPersianMusic(query: string): Promise<any[]> {
   }
 }
 
-// 2. Query YouTube with a fast timeout (unblocked or when VPN is active)
-function searchYouTubeMusic(query: string): Promise<any[]> {
-  return new Promise((resolve) => {
-    const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+// 2. Query YouTube with auto-proxy support (supports V2Ray, Clash, Nekoray or direct)
+async function searchYouTubeMusic(query: string): Promise<{ tracks: any[]; usedProxy: string | null; isBlocked: boolean }> {
+  const proxy = await getEffectiveProxy();
+  const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
 
-    const req = https.get(
-      searchUrl,
-      {
-        timeout: 2500, // Short timeout: fail fast if YouTube is blocked by firewall
+  const executeQuery = (proxyUrl: string | null, timeoutMs = 6500): Promise<any[]> => {
+    return new Promise((resolve) => {
+      const options: https.RequestOptions = {
+        timeout: timeoutMs,
         headers: {
           'User-Agent':
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept-Language': 'fa,en-US,en;q=0.9',
         },
-      },
-      (ytRes) => {
+      };
+
+      if (proxyUrl) {
+        options.agent = new HttpsProxyAgent(proxyUrl);
+      }
+
+      const req = https.get(searchUrl, options, (ytRes) => {
         let html = '';
         ytRes.on('data', (chunk) => (html += chunk));
         ytRes.on('end', () => {
@@ -262,8 +400,89 @@ function searchYouTubeMusic(query: string): Promise<any[]> {
             resolve([]);
           }
         });
+      });
+
+      req.on('error', () => resolve([]));
+      req.on('timeout', () => {
+        req.destroy();
+        resolve([]);
+      });
+    });
+  };
+
+  // 1. If a proxy is configured or detected, try via proxy first
+  if (proxy) {
+    const results = await executeQuery(proxy, 7000);
+    if (results.length > 0) {
+      return { tracks: results, usedProxy: proxy, isBlocked: false };
+    }
+  }
+
+  // 2. Try direct (works on Google Cloud / VPS / abroad / when TUN mode is active)
+  const directResults = await executeQuery(null, 4500);
+  if (directResults.length > 0) {
+    return { tracks: directResults, usedProxy: null, isBlocked: false };
+  }
+
+  // 3. If direct failed and we hadn't tried a proxy yet, do an active probe of common local ports and retry
+  if (!proxy) {
+    for (const p of COMMON_LOCAL_PROXIES) {
+      const open = await probePort(p.port);
+      if (open) {
+        const foundProxy = `http://127.0.0.1:${p.port}`;
+        lastDetectedProxy = foundProxy;
+        const retryResults = await executeQuery(foundProxy, 6000);
+        if (retryResults.length > 0) {
+          return { tracks: retryResults, usedProxy: foundProxy, isBlocked: false };
+        }
       }
-    );
+    }
+  }
+
+  return { tracks: [], usedProxy: proxy, isBlocked: true };
+}
+
+// 3. International Music Engine (Deezer API: Unblocked worldwide, great for Adele, Coldplay, Billie Eilish, etc.)
+function searchDeezerMusic(query: string): Promise<any[]> {
+  return new Promise((resolve) => {
+    const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=8`;
+    const req = https.get(url, { timeout: 4000 }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (!json.data || !Array.isArray(json.data)) {
+            resolve([]);
+            return;
+          }
+
+          const tracks = json.data
+            .filter((item: any) => item.preview)
+            .map((item: any) => ({
+              id: `deezer-${item.id}`,
+              title: item.title,
+              artist: item.artist?.name || 'هنرمند بین‌المللی',
+              album: item.album?.title || 'آهنگ خارجی',
+              duration: item.duration || 30,
+              durationFormatted: `${Math.floor((item.duration || 30) / 60)}:${String((item.duration || 30) % 60).padStart(2, '0')}`,
+              coverUrl: item.album?.cover_medium || item.album?.cover_big || item.album?.cover,
+              audioUrl: item.preview,
+              genre: 'International Pop',
+              isDirect: true,
+              isFullSong: false,
+              isPreview: true,
+              isUnblocked: true,
+              isInternational: true,
+              plays: item.rank || 450000,
+            }));
+
+          resolve(tracks);
+        } catch {
+          resolve([]);
+        }
+      });
+    });
 
     req.on('error', () => resolve([]));
     req.on('timeout', () => {
@@ -402,7 +621,54 @@ app.get('/api/audio/stream', (req, res) => {
   }
 });
 
-// 5. Unified Multi-Engine Music Search API (Full Songs First!)
+// 5. Network & Proxy Diagnostic Endpoints for Iranian local development
+app.get('/api/network/status', async (_req, res) => {
+  const effectiveProxy = await getEffectiveProxy();
+  const availableProxies: any[] = [];
+
+  for (const p of COMMON_LOCAL_PROXIES) {
+    const isOpen = await probePort(p.port);
+    availableProxies.push({
+      ...p,
+      isOpen,
+      url: `http://127.0.0.1:${p.port}`,
+    });
+  }
+
+  res.json({
+    configuredProxy: configuredProxyUrl,
+    activeProxy: effectiveProxy,
+    detectedProxy: lastDetectedProxy,
+    isLocal: port === 3000,
+    availableProxies,
+    tips: [
+      'در نرم‌افزار v2rayN دکمه "Enable Tun Mode" را روشن کنید تا ترافیک کل سیستم و Node.js بدون نیاز به تنظیمات از فیلترشکن رد شود.',
+      'در Nekoray تیک گزینه "حالت TUN" را فعال کنید.',
+      'یا در بخش تنظیمات پروکسی پورت 10809 (v2rayN) یا 7890 (Clash) را ثبت کنید.',
+    ],
+  });
+});
+
+app.post('/api/network/set-proxy', (req, res) => {
+  const { proxyUrl } = req.body;
+  if (!proxyUrl || proxyUrl === 'none' || proxyUrl === 'direct') {
+    configuredProxyUrl = null;
+    return res.json({ success: true, message: 'پروکسی حذف شد و اتصال مستقیم فعال شد.', activeProxy: null });
+  }
+
+  try {
+    let formatted = proxyUrl.trim();
+    if (!formatted.startsWith('http://') && !formatted.startsWith('socks5://')) {
+      formatted = `http://${formatted}`;
+    }
+    configuredProxyUrl = formatted;
+    res.json({ success: true, message: `پروکسی ${configuredProxyUrl} با موفقیت تنظیم شد.`, activeProxy: configuredProxyUrl });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// 6. Unified Multi-Engine Music Search API (Full Songs First + Deezer English + YouTube Auto-Proxy)
 app.get(['/api/search', '/api/youtube/search'], async (req, res) => {
   const query = ((req.query.q as string) || '').trim();
   if (!query) {
@@ -411,34 +677,55 @@ app.get(['/api/search', '/api/youtube/search'], async (req, res) => {
       fullTracks: [],
       directResults: [],
       youtubeResults: [],
+      deezerResults: [],
       previewResults: [],
+      youtubeStatus: { isBlocked: false, usedProxy: null },
     });
   }
 
   try {
-    // Run full Persian music search, YouTube, and iTunes search in parallel
-    const [fullTracks, youtubeTracks, previewTracks] = await Promise.all([
+    // Run full Persian music search, YouTube with auto-proxy, Deezer international, and iTunes in parallel
+    const [fullTracks, ytData, deezerTracks, previewTracks] = await Promise.all([
       searchFullPersianMusic(query),
       searchYouTubeMusic(query),
+      searchDeezerMusic(query),
       searchUnblockedMusic(query),
     ]);
 
-    // Unblocked direct results: prefer full tracks over 30s previews
-    const directResults = fullTracks.length > 0 ? fullTracks : previewTracks;
+    const youtubeTracks = ytData.tracks || [];
 
-    // Combined list: Full complete tracks first, then YouTube, then previews if needed
-    const combined = [...fullTracks, ...youtubeTracks, ...(fullTracks.length === 0 ? previewTracks : [])];
+    // Unblocked direct results: prefer full tracks, then Deezer international, then iTunes previews
+    const directResults =
+      fullTracks.length > 0
+        ? fullTracks
+        : deezerTracks.length > 0
+        ? deezerTracks
+        : previewTracks;
+
+    // Combined list: Full complete tracks first, then Deezer international, then YouTube, then previews
+    const combined = [
+      ...fullTracks,
+      ...deezerTracks,
+      ...youtubeTracks,
+      ...(fullTracks.length === 0 && deezerTracks.length === 0 ? previewTracks : []),
+    ];
 
     res.json({
       results: combined,
       fullTracks,
       directResults,
       youtubeResults: youtubeTracks,
+      deezerResults: deezerTracks,
       previewResults: previewTracks,
       query,
       fullCount: fullTracks.length,
       unblockedCount: directResults.length,
       youtubeCount: youtubeTracks.length,
+      deezerCount: deezerTracks.length,
+      youtubeStatus: {
+        isBlocked: ytData.isBlocked,
+        usedProxy: ytData.usedProxy,
+      },
     });
   } catch (err: any) {
     console.error('Search error:', err);

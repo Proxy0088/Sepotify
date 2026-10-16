@@ -9,6 +9,7 @@ import {
   Monitor,
   HelpCircle,
   Sparkles,
+  Shield,
 } from 'lucide-react';
 import { TabDestination } from './BottomTabBar';
 
@@ -22,6 +23,8 @@ interface TopNavProps {
   isMobileFrame: boolean;
   onToggleMobileFrame: () => void;
   onOpenTestingGuide: () => void;
+  onOpenNetworkProxy?: () => void;
+  isVpnDetected?: boolean | null;
   onBack: () => void;
   onForward: () => void;
   canBack: boolean;
@@ -38,6 +41,8 @@ export const TopNav: React.FC<TopNavProps> = ({
   isMobileFrame,
   onToggleMobileFrame,
   onOpenTestingGuide,
+  onOpenNetworkProxy,
+  isVpnDetected,
   onBack,
   onForward,
   canBack,
@@ -150,6 +155,41 @@ export const TopNav: React.FC<TopNavProps> = ({
             <Monitor className="w-3.5 h-3.5" />
           )}
         </button>
+
+        {/* Auto-detected Network & Proxy Status Button */}
+        {onOpenNetworkProxy && (
+          <button
+            onClick={onOpenNetworkProxy}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full liquid-glass text-[11px] font-medium transition-all ${
+              isVpnDetected
+                ? 'border border-[#1ed760]/50 text-[#1ed760] shadow-[0_0_12px_rgba(30,215,96,0.2)]'
+                : 'text-white/70 hover:text-white'
+            }`}
+            title={
+              isVpnDetected
+                ? 'فیلترشکن خودکار شناسایی شد (یوتیوب متصل است)'
+                : 'اتصال مستقیم (بدون فیلترشکن)'
+            }
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isVpnDetected === true
+                  ? 'bg-[#1ed760] animate-pulse'
+                  : isVpnDetected === false
+                  ? 'bg-amber-400'
+                  : 'bg-white/30'
+              }`}
+            />
+            <Shield className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">
+              {isVpnDetected === true
+                ? 'VPN خودکار فعال'
+                : isVpnDetected === false
+                ? 'مستقیم (آزاد)'
+                : 'بررسی VPN...'}
+            </span>
+          </button>
+        )}
 
         {/* Planning & Testing Guide Modal Button */}
         <button
