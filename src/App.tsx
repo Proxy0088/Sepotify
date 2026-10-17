@@ -39,6 +39,7 @@ import {
   downloadTrackToIndexedDB,
   removeTrackFromIndexedDB,
   getDownloadedTracks,
+  getDownloadedAudioUrl,
   getStoredLikes,
   saveStoredLikes,
   getStoredPlaylists,
@@ -256,7 +257,7 @@ export default function App() {
   };
 
   // Play track handler
-  const handlePlayTrack = (track: Track, newQueue?: Track[]) => {
+  const handlePlayTrack = async (track: Track, newQueue?: Track[]) => {
     if (newQueue) {
       setQueue(newQueue);
     } else {
@@ -275,7 +276,14 @@ export default function App() {
     recordTrackPlay(track);
     setStats(getStoredStats());
 
-    if (track.youtubeId) {
+    // Check if this track is cached offline in IndexedDB
+    const isDownloadedOffline = downloadedIdSet.has(track.id) || track.isDownloaded;
+    const offlineUrl = await getDownloadedAudioUrl(track.id);
+
+    if (offlineUrl || isDownloadedOffline) {
+      // Offline playback: ALWAYS route through HTML5 audioEngine using the local blob
+      audioEngine.playTrack(offlineUrl ? { ...track, audioUrl: offlineUrl } : track);
+    } else if (track.youtubeId) {
       audioEngine.pause();
     } else {
       audioEngine.playTrack(track);
@@ -289,7 +297,8 @@ export default function App() {
       }
       return;
     }
-    if (currentTrack.youtubeId) {
+    const isDownloadedOffline = downloadedIdSet.has(currentTrack.id) || currentTrack.isDownloaded;
+    if (currentTrack.youtubeId && !isDownloadedOffline) {
       setIsPlaying((prev) => !prev);
     } else {
       if (isPlaying) {
@@ -302,7 +311,10 @@ export default function App() {
 
   const handleSeek = (time: number) => {
     setCurrentTime(time);
-    if (currentTrack?.youtubeId) {
+    const isDownloadedOffline = currentTrack
+      ? downloadedIdSet.has(currentTrack.id) || currentTrack.isDownloaded
+      : false;
+    if (currentTrack?.youtubeId && !isDownloadedOffline) {
       setSeekTarget(time);
     } else {
       audioEngine.seek(time);
@@ -311,6 +323,13 @@ export default function App() {
 
   // Bot-check automatic fallback: if YouTube prompts for sign-in / bot check or network block
   const handleYouTubeFallback = async (failedTrack: Track) => {
+    // If track is downloaded or user is currently in offline mode or network is down, do not run online fallback
+    const isDownloaded = downloadedIdSet.has(failedTrack.id) || failedTrack.isDownloaded;
+    const isOffline = isOfflineMode || (typeof navigator !== 'undefined' && !navigator.onLine);
+    if (isDownloaded || isOffline) {
+      return;
+    }
+
     console.warn('YouTube playback restricted or bot-check triggered for:', failedTrack.title);
 
     // Clean track title to match against MP3s and Deezer
@@ -427,8 +446,17 @@ export default function App() {
     const isAlreadyDownloaded = downloadedIdSet.has(track.id);
     if (isAlreadyDownloaded) {
       await removeTrackFromIndexedDB(track.id);
+      setFallbackToast(`آهنگ «${track.title}» از حافظه آفلاین حذف شد.`);
+      setTimeout(() => setFallbackToast(null), 3500);
     } else {
-      await downloadTrackToIndexedDB(track);
+      setFallbackToast(`در حال دانلود و ذخیره‌سازی فایل صوتی «${track.title}» برای استفاده آفلاین بدون اینترنت...`);
+      const ok = await downloadTrackToIndexedDB(track);
+      if (ok) {
+        setFallbackToast(`فایل صوتی «${track.title}» با موفقیت دانلود شد و بدون نیاز به اینترنت قابل پخش است.`);
+      } else {
+        setFallbackToast(`خطا در دانلود فایل صوتی «${track.title}».`);
+      }
+      setTimeout(() => setFallbackToast(null), 5000);
     }
     const updated = await getDownloadedTracks();
     setDownloadedTracks(updated);
@@ -1376,6 +1404,13 @@ export default function App() {
           isPlaying={isPlaying}
           volume={volume}
           seekTime={seekTarget}
+          isOffline={Boolean(
+            currentTrack &&
+              (downloadedIdSet.has(currentTrack.id) ||
+                currentTrack.isDownloaded ||
+                isOfflineMode ||
+                (typeof navigator !== 'undefined' && !navigator.onLine))
+          )}
           onTimeUpdate={(cur, dur) => {
             setCurrentTime(cur);
             setDuration(dur);

@@ -63,8 +63,15 @@ class AudioEngine {
 
       this.audio.addEventListener('error', (e) => {
         console.warn('Audio tag error:', e);
-        // If proxy stream failed, try direct src as fallback
-        if (this.audio && this.audio.src && this.audio.src.includes('/api/audio/stream') && this.currentTrack?.audioUrl) {
+        // If proxy stream failed, try direct src as fallback (only for non-YouTube direct audio links)
+        if (
+          this.audio &&
+          this.audio.src &&
+          this.audio.src.includes('/api/audio/stream') &&
+          this.currentTrack?.audioUrl &&
+          !this.currentTrack.audioUrl.includes('youtube.com') &&
+          !this.currentTrack.audioUrl.includes('youtu.be')
+        ) {
           console.log('Falling back to direct audioUrl...');
           this.audio.src = this.currentTrack.audioUrl;
           this.audio.load();
@@ -89,6 +96,13 @@ class AudioEngine {
       const offlineUrl = await getDownloadedAudioUrl(track.id);
       let targetSrc = offlineUrl || track.audioUrl;
 
+      // If this is a YouTube track and has no offline downloaded blob:
+      if (!offlineUrl && (track.youtubeId || targetSrc.includes('youtube.com') || targetSrc.includes('youtu.be'))) {
+        // Let the YouTube engine handle streaming online; do not feed a YouTube web link to HTML5 <audio>
+        this.audio.pause();
+        return;
+      }
+
       // If remote external MP3 and not cached offline, route through audio proxy for HTTP Range & zero-cutoff streaming
       if (!offlineUrl && targetSrc.startsWith('http') && !targetSrc.includes('/api/audio/stream')) {
         targetSrc = `/api/audio/stream?url=${encodeURIComponent(targetSrc)}`;
@@ -100,13 +114,17 @@ class AudioEngine {
       const playPromise = this.audio.play();
       if (playPromise !== undefined) {
         await playPromise.catch((err) => {
-          console.warn('HTML5 Audio play prevented:', err);
-          this.callbacks.onError('عدم امکان پخش خودکار مرورگر');
+          if (err?.name !== 'AbortError') {
+            console.warn('HTML5 Audio play prevented:', err);
+            this.callbacks.onError('عدم امکان پخش خودکار مرورگر');
+          }
         });
       }
     } catch (e: any) {
-      console.warn('Playback error:', e);
-      this.callbacks.onError(e.message || 'خطا در بارگذاری');
+      if (e?.name !== 'AbortError') {
+        console.warn('Playback error:', e);
+        this.callbacks.onError(e.message || 'خطا در بارگذاری');
+      }
     }
   }
 

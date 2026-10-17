@@ -18,6 +18,7 @@ interface YouTubeAudioOnlyPlayerProps {
   onPlayStateChange: (isPlaying: boolean) => void;
   onEnded: () => void;
   onPlaybackError?: (track: Track) => void;
+  isOffline?: boolean;
 }
 
 export const YouTubeAudioOnlyPlayer: React.FC<YouTubeAudioOnlyPlayerProps> = ({
@@ -29,6 +30,7 @@ export const YouTubeAudioOnlyPlayer: React.FC<YouTubeAudioOnlyPlayerProps> = ({
   onPlayStateChange,
   onEnded,
   onPlaybackError,
+  isOffline,
 }) => {
   const playerRef = useRef<any>(null);
   const isApiReadyRef = useRef<boolean>(false);
@@ -36,11 +38,12 @@ export const YouTubeAudioOnlyPlayer: React.FC<YouTubeAudioOnlyPlayerProps> = ({
   const watchdogTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pollTimerRef = useRef<number | null>(null);
 
-  const isYouTubeTrack = Boolean(currentTrack?.youtubeId);
+  const isYouTubeTrack = Boolean(currentTrack?.youtubeId) && !isOffline;
 
-  // 1. Load the official YouTube Iframe API script once
+  // 1. Load the official YouTube Iframe API script once (only when online)
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (isOffline || (typeof navigator !== 'undefined' && !navigator.onLine)) return;
 
     if (window.YT && window.YT.Player) {
       isApiReadyRef.current = true;
@@ -55,7 +58,9 @@ export const YouTubeAudioOnlyPlayer: React.FC<YouTubeAudioOnlyPlayerProps> = ({
       script.async = true;
       script.onerror = () => {
         console.warn('Failed to load YouTube iframe API script (network filtered)');
-        if (currentTrack) onPlaybackError?.(currentTrack);
+        if (currentTrack && !isOffline && (typeof navigator === 'undefined' || navigator.onLine)) {
+          onPlaybackError?.(currentTrack);
+        }
       };
       document.body.appendChild(script);
 
@@ -67,7 +72,7 @@ export const YouTubeAudioOnlyPlayer: React.FC<YouTubeAudioOnlyPlayerProps> = ({
         }
       };
     }
-  }, [currentTrack, onPlaybackError]);
+  }, [currentTrack, onPlaybackError, isOffline]);
 
   // Clean watchdog timer
   const clearWatchdog = () => {

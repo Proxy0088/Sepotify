@@ -29,22 +29,53 @@ function openDB(): Promise<IDBDatabase> {
   });
 }
 
-// Download a track: fetch its audio, store Blob and metadata in IndexedDB
+// Download a track: fetch its real audio stream, store ArrayBuffer/Blob and metadata in IndexedDB
 export async function downloadTrackToIndexedDB(track: Track): Promise<boolean> {
   try {
     const db = await openDB();
 
-    // Fetch the audio stream
-    const response = await fetch(track.audioUrl, { mode: 'cors' });
+    // Determine download URL
+    let downloadUrl: string;
+
+    if (
+      track.audioUrl &&
+      track.audioUrl.startsWith('http') &&
+      !track.youtubeId &&
+      !track.audioUrl.includes('youtube.com') &&
+      !track.audioUrl.includes('youtu.be') &&
+      track.audioUrl.includes('.mp3')
+    ) {
+      // Direct MP3 - route through proxy to avoid CORS
+      downloadUrl = `/api/audio/stream?url=${encodeURIComponent(track.audioUrl)}`;
+    } else {
+      // YouTube track or dynamic source - resolve real MP3 audio via server download engine
+      downloadUrl = `/api/audio/download?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.artist || '')}&youtubeId=${encodeURIComponent(track.youtubeId || '')}&url=${encodeURIComponent(track.audioUrl || '')}`;
+    }
+
+    const response = await fetch(downloadUrl);
     let blob: Blob;
 
     if (response.ok) {
       blob = await response.blob();
     } else {
-      // Fallback: create synthetic audio blob so offline mode is ALWAYS testable and fully functional
-      const emptyBuffer = new ArrayBuffer(1024 * 64);
-      blob = new Blob([emptyBuffer], { type: 'audio/mp3' });
+      throw new Error(`Download endpoint returned HTTP ${response.status}`);
     }
+
+    if (blob.size < 1000) {
+      throw new Error('Downloaded audio blob is too small');
+    }
+
+    // Convert to ArrayBuffer for universal browser/WebKit IndexedDB serialization without DataCloneError
+    let buffer: ArrayBuffer | null = null;
+    try {
+      buffer = await blob.arrayBuffer();
+    } catch {
+      // Fallback to storing blob directly
+    }
+
+    const storagePayload = buffer
+      ? { buffer, type: blob.type || 'audio/mpeg', size: blob.size }
+      : blob;
 
     return new Promise((resolve, reject) => {
       const tx = db.transaction([STORE_TRACKS, STORE_AUDIO_BLOBS], 'readwrite');
@@ -52,29 +83,20 @@ export async function downloadTrackToIndexedDB(track: Track): Promise<boolean> {
       const blobStore = tx.objectStore(STORE_AUDIO_BLOBS);
 
       trackStore.put({ ...track, isDownloaded: true, downloadedAt: Date.now() });
-      blobStore.put(blob, track.id);
+      blobStore.put(storagePayload, track.id);
+
+      // Also index by youtubeId if available to guarantee retrieval under both keys
+      if (track.youtubeId && track.youtubeId !== track.id) {
+        blobStore.put(storagePayload, track.youtubeId);
+        blobStore.put(storagePayload, `yt-${track.youtubeId}`);
+      }
 
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => reject(tx.error);
     });
   } catch (error) {
-    console.warn('Could not fetch audio for offline caching, storing metadata fallback:', error);
-    try {
-      const db = await openDB();
-      const tx = db.transaction([STORE_TRACKS, STORE_AUDIO_BLOBS], 'readwrite');
-      const trackStore = tx.objectStore(STORE_TRACKS);
-      const blobStore = tx.objectStore(STORE_AUDIO_BLOBS);
-
-      trackStore.put({ ...track, isDownloaded: true, downloadedAt: Date.now() });
-      blobStore.put(new Blob(['offline_sample_data'], { type: 'text/plain' }), track.id);
-
-      return new Promise((resolve) => {
-        tx.oncomplete = () => resolve(true);
-        tx.onerror = () => resolve(false);
-      });
-    } catch {
-      return false;
-    }
+    console.error('Download error for track:', track.title, error);
+    return false;
   }
 }
 
@@ -85,17 +107,58 @@ export async function getDownloadedAudioUrl(trackId: string): Promise<string | n
     return new Promise((resolve) => {
       const tx = db.transaction(STORE_AUDIO_BLOBS, 'readonly');
       const store = tx.objectStore(STORE_AUDIO_BLOBS);
-      const req = store.get(trackId);
 
-      req.onsuccess = () => {
-        const result = req.result;
-        if (result && result instanceof Blob && result.size > 2000) {
-          resolve(URL.createObjectURL(result));
-        } else {
+      const candidateKeys = [
+        trackId,
+        trackId.startsWith('yt-') ? trackId.replace(/^yt-/, '') : `yt-${trackId}`,
+      ];
+
+      const checkNext = (idx: number) => {
+        if (idx >= candidateKeys.length) {
           resolve(null);
+          return;
         }
+
+        const key = candidateKeys[idx];
+        const req = store.get(key);
+
+        req.onsuccess = () => {
+          const result = req.result;
+          if (!result) {
+            checkNext(idx + 1);
+            return;
+          }
+
+          try {
+            let audioBlob: Blob | null = null;
+            if (result instanceof Blob) {
+              audioBlob = new Blob([result], {
+                type: result.type && result.type.startsWith('audio/') ? result.type : 'audio/mpeg',
+              });
+            } else if (result?.buffer && (result.buffer instanceof ArrayBuffer || ArrayBuffer.isView(result.buffer))) {
+              audioBlob = new Blob([result.buffer], {
+                type: result.type && result.type.startsWith('audio/') ? result.type : 'audio/mpeg',
+              });
+            } else if (result instanceof ArrayBuffer) {
+              audioBlob = new Blob([result], { type: 'audio/mpeg' });
+            }
+
+            if (audioBlob && audioBlob.size > 1000) {
+              const url = URL.createObjectURL(audioBlob);
+              resolve(url);
+            } else {
+              checkNext(idx + 1);
+            }
+          } catch (e) {
+            console.warn('Error reading audio blob from IndexedDB:', e);
+            checkNext(idx + 1);
+          }
+        };
+
+        req.onerror = () => checkNext(idx + 1);
       };
-      req.onerror = () => resolve(null);
+
+      checkNext(0);
     });
   } catch {
     return null;
@@ -110,6 +173,11 @@ export async function removeTrackFromIndexedDB(trackId: string): Promise<boolean
       const tx = db.transaction([STORE_TRACKS, STORE_AUDIO_BLOBS], 'readwrite');
       tx.objectStore(STORE_TRACKS).delete(trackId);
       tx.objectStore(STORE_AUDIO_BLOBS).delete(trackId);
+      if (trackId.startsWith('yt-')) {
+        tx.objectStore(STORE_AUDIO_BLOBS).delete(trackId.replace(/^yt-/, ''));
+      } else {
+        tx.objectStore(STORE_AUDIO_BLOBS).delete(`yt-${trackId}`);
+      }
 
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => reject(tx.error);
