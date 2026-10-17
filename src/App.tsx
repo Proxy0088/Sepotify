@@ -61,6 +61,7 @@ import { NowPlayingSheet } from './components/NowPlayingSheet';
 import { CreatePlaylistModal } from './components/CreatePlaylistModal';
 import { TestingGuideModal } from './components/TestingGuideModal';
 import { NetworkProxyModal } from './components/NetworkProxyModal';
+import { YouTubeAudioOnlyPlayer } from './components/YouTubeAudioOnlyPlayer';
 
 export default function App() {
   // Navigation State
@@ -110,6 +111,7 @@ export default function App() {
   const [isNetworkModalOpen, setIsNetworkModalOpen] = useState(false);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
   const [isMobileFrame, setIsMobileFrame] = useState(false);
+  const [fallbackToast, setFallbackToast] = useState<string | null>(null);
 
   // User Play Stats for Recommendation Engine
   const [stats, setStats] = useState(() => getStoredStats());
@@ -272,7 +274,12 @@ export default function App() {
     setSeekTarget(null);
     recordTrackPlay(track);
     setStats(getStoredStats());
-    audioEngine.playTrack(track);
+
+    if (track.youtubeId) {
+      audioEngine.pause();
+    } else {
+      audioEngine.playTrack(track);
+    }
   };
 
   const handlePlayPause = () => {
@@ -282,16 +289,87 @@ export default function App() {
       }
       return;
     }
-    if (isPlaying) {
-      audioEngine.pause();
+    if (currentTrack.youtubeId) {
+      setIsPlaying((prev) => !prev);
     } else {
-      audioEngine.resume();
+      if (isPlaying) {
+        audioEngine.pause();
+      } else {
+        audioEngine.resume();
+      }
     }
   };
 
   const handleSeek = (time: number) => {
     setCurrentTime(time);
-    audioEngine.seek(time);
+    if (currentTrack?.youtubeId) {
+      setSeekTarget(time);
+    } else {
+      audioEngine.seek(time);
+    }
+  };
+
+  // Bot-check automatic fallback: if YouTube prompts for sign-in / bot check or network block
+  const handleYouTubeFallback = async (failedTrack: Track) => {
+    console.warn('YouTube playback restricted or bot-check triggered for:', failedTrack.title);
+
+    // Clean track title to match against MP3s and Deezer
+    const cleanTitle = failedTrack.title
+      .replace(/\(Official.+?\)/gi, '')
+      .replace(/\[Official.+?\]/gi, '')
+      .replace(/\(Audio.+?\)/gi, '')
+      .replace(/\(Video.+?\)/gi, '')
+      .replace(/ft\..+$/gi, '')
+      .replace(/feat\..+$/gi, '')
+      .trim();
+
+    const titleWords = cleanTitle.toLowerCase().split(/[\s-]+/).filter((w) => w.length >= 3);
+
+    const isMatch = (t: Track) => {
+      if (t.id === failedTrack.id) return false;
+      const combined = (t.title + ' ' + t.artist).toLowerCase();
+      return titleWords.some((w) => combined.includes(w));
+    };
+
+    let alternative =
+      fullTracks.find(isMatch) ||
+      deezerResults.find(isMatch) ||
+      directResults.find(isMatch);
+
+    // If not found in current list, try an instant fetch for the track's unblocked audio
+    if (!alternative) {
+      try {
+        const queryTerm = cleanTitle || failedTrack.title.slice(0, 20);
+        const res = await fetch(`/api/search?q=${encodeURIComponent(queryTerm)}`);
+        const data = await res.json();
+        const pool: Track[] = [
+          ...(data.fullTracks || []),
+          ...(data.deezerResults || []),
+          ...(data.directResults || []),
+        ];
+        alternative = pool.find(isMatch) || pool[0];
+      } catch {
+        // Ignore
+      }
+    }
+
+    // Ultimate fallback to first available unblocked track
+    if (!alternative) {
+      alternative = fullTracks[0] || deezerResults[0] || directResults[0];
+    }
+
+    if (alternative) {
+      setFallbackToast(
+        `محدودیت ربات‌یاب یوتیوب رد شد؛ در حال پخش نسخه صوتی («${alternative.title}»)`
+      );
+      setTimeout(() => setFallbackToast(null), 5000);
+      handlePlayTrack(alternative);
+    } else {
+      setFallbackToast(
+        'پخش این موزیک در یوتیوب محدود بود. لطفاً از بخش «آهنگ‌های کامل ۳۲۰» یا Deezer استفاده کنید.'
+      );
+      setTimeout(() => setFallbackToast(null), 6000);
+    }
   };
 
   const handleNextTrack = () => {
@@ -780,7 +858,7 @@ export default function App() {
                               : 'liquid-glass text-white/60 hover:text-white'
                           }`}
                         >
-                          همه آهنگ‌ها ({fullTracks.length + deezerResults.length + directResults.length})
+                          همه آهنگ‌ها ({fullTracks.length + youtubeResults.length + deezerResults.length + directResults.length})
                         </button>
                         {fullTracks.length > 0 && (
                           <button
@@ -795,6 +873,19 @@ export default function App() {
                             <span className="font-mono text-[11px]">({fullTracks.length})</span>
                           </button>
                         )}
+                        {youtubeResults.length > 0 && (
+                          <button
+                            onClick={() => setActiveSourceFilter('youtube')}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full font-semibold transition-all whitespace-nowrap ${
+                              activeSourceFilter === 'youtube'
+                                ? 'bg-red-600 text-white shadow-md'
+                                : 'liquid-glass text-red-400 hover:bg-red-600/10 border border-red-500/30'
+                            }`}
+                          >
+                            <span>🔴 یوتیوب (صوتی)</span>
+                            <span className="font-mono text-[11px]">({youtubeResults.length})</span>
+                          </button>
+                        )}
                         {deezerResults.length > 0 && (
                           <button
                             onClick={() => setActiveSourceFilter('deezer')}
@@ -804,7 +895,7 @@ export default function App() {
                                 : 'liquid-glass text-cyan-400 hover:bg-cyan-500/10 border border-cyan-500/30'
                             }`}
                           >
-                            <span>🌍 آهنگ‌های بین‌المللی (خارجی)</span>
+                            <span>🌍 آهنگ‌های بین‌المللی</span>
                             <span className="font-mono text-[11px]">({deezerResults.length})</span>
                           </button>
                         )}
@@ -858,7 +949,54 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Section 2: International Music (Deezer - Guaranteed unblocked for English songs!) */}
+                    {/* Section 2: YouTube Pure Audio Stream (No video box, pure Spotify audio with fallback) */}
+                    {searchQuery && (activeSourceFilter === 'all' || activeSourceFilter === 'youtube') && (
+                      <div className="liquid-glass p-4 rounded-[16px] border border-red-500/20 shadow-xl">
+                        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                          <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span className="p-1 rounded bg-red-600 text-white">
+                              <Youtube className="w-4 h-4" />
+                            </span>
+                            <span>آهنگ‌های یوتیوب (پخش صوتی خالص - بدون ویدیو)</span>
+                            {isSearchingMusic && youtubeResults.length === 0 && (
+                              <Loader2 className="w-4 h-4 text-red-400 animate-spin mr-2" />
+                            )}
+                          </h3>
+                          <span className="text-[11px] text-[#b3b3b3]">
+                            پخش مستقیم صوت و کاور موزیک بدون افت کیفیت
+                          </span>
+                        </div>
+
+                        {youtubeResults.length > 0 ? (
+                          <div className="space-y-1.5">
+                            {youtubeResults.map((ytTrack, i) => (
+                              <TrackRow
+                                key={ytTrack.id}
+                                track={ytTrack}
+                                index={i}
+                                isCurrent={currentTrack?.youtubeId === ytTrack.youtubeId}
+                                isPlaying={isPlaying}
+                                isLiked={likedTrackIds.includes(ytTrack.id)}
+                                isDownloaded={downloadedIdSet.has(ytTrack.id)}
+                                onPlay={(t) => handlePlayTrack(t, youtubeResults)}
+                                onToggleLike={handleToggleLike}
+                                onToggleDownload={handleToggleDownload}
+                              />
+                            ))}
+                          </div>
+                        ) : isSearchingMusic ? (
+                          <div className="py-6 text-center text-[#b3b3b3] text-xs">
+                            در حال جستجو در میان آهنگ‌های یوتیوب...
+                          </div>
+                        ) : (
+                          <div className="py-4 text-center text-[#b3b3b3] text-xs">
+                            موردی از یوتیوب یافت نشد. می‌توانید از آهنگ‌های کامل بخش‌های بالا استفاده کنید.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Section 3: International Music (Deezer) */}
                     {searchQuery && (activeSourceFilter === 'all' || activeSourceFilter === 'deezer') && deezerResults.length > 0 && (
                       <div className="liquid-glass p-4 rounded-[16px] border border-cyan-500/30 shadow-xl relative overflow-hidden">
                         <div className="flex items-center justify-between mb-3">
@@ -1232,6 +1370,26 @@ export default function App() {
           />
         )}
 
+        {/* Background YouTube Audio-Only Engine (No video frame, zero-UI, pure Spotify music with bot-check auto-fallback) */}
+        <YouTubeAudioOnlyPlayer
+          currentTrack={currentTrack}
+          isPlaying={isPlaying}
+          volume={volume}
+          seekTime={seekTarget}
+          onTimeUpdate={(cur, dur) => {
+            setCurrentTime(cur);
+            setDuration(dur);
+            setSeekTarget(null);
+          }}
+          onPlayStateChange={(playing) => {
+            setIsPlaying(playing);
+          }}
+          onEnded={() => {
+            handleNextTrack();
+          }}
+          onPlaybackError={handleYouTubeFallback}
+        />
+
         {/* Modals */}
         <CreatePlaylistModal
           isOpen={isCreatePlaylistOpen}
@@ -1284,6 +1442,27 @@ export default function App() {
             }
           }}
         />
+
+        {/* Floating Fallback / Bot-Check Notification Toast */}
+        {fallbackToast && (
+          <div
+            className="fixed top-20 left-1/2 -translate-x-1/2 z-50 max-w-md w-[90%] px-4 py-3 rounded-2xl liquid-glass-elevated border border-emerald-500/30 text-white shadow-2xl flex items-center justify-between gap-3 animate-in fade-in slide-in-from-top-4 duration-300 backdrop-blur-xl"
+            dir="rtl"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#1ed760] shrink-0 animate-pulse shadow-[0_0_8px_#1ed760]" />
+              <p className="text-xs font-medium text-emerald-100 leading-relaxed truncate">
+                {fallbackToast}
+              </p>
+            </div>
+            <button
+              onClick={() => setFallbackToast(null)}
+              className="p-1 rounded-full text-white/50 hover:text-white hover:bg-white/10 shrink-0 text-xs"
+            >
+              ✕
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -684,12 +684,15 @@ app.get(['/api/search', '/api/youtube/search'], async (req, res) => {
   }
 
   try {
-    // Run full Persian music search, Deezer international, and iTunes in parallel (100% Pure Audio, 0% Video, No Bot Gate!)
-    const [fullTracks, deezerTracks, previewTracks] = await Promise.all([
+    // Run full Persian music search, YouTube, Deezer international, and iTunes in parallel
+    const [fullTracks, ytData, deezerTracks, previewTracks] = await Promise.all([
       searchFullPersianMusic(query),
+      searchYouTubeMusic(query),
       searchDeezerMusic(query),
       searchUnblockedMusic(query),
     ]);
+
+    const youtubeTracks = ytData.tracks || [];
 
     // Unblocked direct results: prefer full tracks, then Deezer international, then iTunes previews
     const directResults =
@@ -699,28 +702,29 @@ app.get(['/api/search', '/api/youtube/search'], async (req, res) => {
         ? deezerTracks
         : previewTracks;
 
-    // Combined list: Full complete tracks first, then Deezer international, then previews
+    // Combined list: Full complete tracks first, then YouTube, then Deezer international, then previews
     const combined = [
       ...fullTracks,
+      ...youtubeTracks,
       ...deezerTracks,
-      ...(fullTracks.length === 0 && deezerTracks.length === 0 ? previewTracks : []),
+      ...(fullTracks.length === 0 && deezerTracks.length === 0 && youtubeTracks.length === 0 ? previewTracks : []),
     ];
 
     res.json({
       results: combined,
       fullTracks,
       directResults,
-      youtubeResults: [],
+      youtubeResults: youtubeTracks,
       deezerResults: deezerTracks,
       previewResults: previewTracks,
       query,
       fullCount: fullTracks.length,
       unblockedCount: directResults.length,
-      youtubeCount: 0,
+      youtubeCount: youtubeTracks.length,
       deezerCount: deezerTracks.length,
       youtubeStatus: {
-        isBlocked: false,
-        usedProxy: null,
+        isBlocked: ytData.isBlocked,
+        usedProxy: ytData.usedProxy,
       },
     });
   } catch (err: any) {
