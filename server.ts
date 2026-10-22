@@ -558,67 +558,214 @@ function searchUnblockedMusic(term: string): Promise<any[]> {
   });
 }
 
-// 4. Audio Streaming Proxy with HTTP Range Requests (Ensures seamless scrubbing and no mobile cutoff)
+// 4. Audio Streaming Proxy with HTTP Range Requests and Redirect Following
 app.get('/api/audio/stream', (req, res) => {
   const targetUrl = (req.query.url as string) || '';
   if (!targetUrl || !targetUrl.startsWith('http')) {
     return res.status(400).send('Invalid or missing audio URL');
   }
 
-  try {
-    const parsed = new URL(targetUrl);
-    const mod = parsed.protocol === 'https:' ? https : http;
-    const clientHeaders: Record<string, string> = {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      Accept: '*/*',
-    };
-
-    if (req.headers.range) {
-      clientHeaders['Range'] = req.headers.range;
+  const streamWithRedirects = (currentUrl: string, hops = 0) => {
+    if (hops > 5) {
+      if (!res.headersSent) res.status(502).send('Too many redirects');
+      return;
     }
 
-    const proxyReq = mod.get(targetUrl, { headers: clientHeaders, timeout: 15000 }, (remoteRes) => {
-      // Forward status code (200 or 206)
-      res.status(remoteRes.statusCode || 200);
+    try {
+      const parsed = new URL(currentUrl);
+      const mod = parsed.protocol === 'https:' ? https : http;
+      const clientHeaders: Record<string, string> = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: '*/*',
+      };
 
-      // Forward crucial audio streaming headers
-      const forwardHeaders = [
-        'content-type',
-        'content-length',
-        'content-range',
-        'accept-ranges',
-        'cache-control',
-      ];
+      if (req.headers.range) {
+        clientHeaders['Range'] = req.headers.range;
+      }
 
-      forwardHeaders.forEach((h) => {
-        if (remoteRes.headers[h]) {
-          res.setHeader(h, remoteRes.headers[h] as string);
+      const proxyReq = mod.get(currentUrl, { headers: clientHeaders, timeout: 20000 }, (remoteRes) => {
+        // Handle 301, 302, 307, 308 redirects
+        if (
+          remoteRes.statusCode &&
+          remoteRes.statusCode >= 300 &&
+          remoteRes.statusCode < 400 &&
+          remoteRes.headers.location
+        ) {
+          const redirectLocation = new URL(remoteRes.headers.location, currentUrl).href;
+          return streamWithRedirects(redirectLocation, hops + 1);
+        }
+
+        res.status(remoteRes.statusCode || 200);
+
+        const forwardHeaders = [
+          'content-type',
+          'content-length',
+          'content-range',
+          'accept-ranges',
+          'cache-control',
+        ];
+
+        forwardHeaders.forEach((h) => {
+          if (remoteRes.headers[h]) {
+            res.setHeader(h, remoteRes.headers[h] as string);
+          }
+        });
+
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+
+        remoteRes.pipe(res);
+      });
+
+      proxyReq.on('error', (err) => {
+        console.warn('Audio proxy request failed:', err.message);
+        if (!res.headersSent) {
+          res.status(502).send('Error streaming remote audio');
         }
       });
 
-      // Enable CORS & Range
-      res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-
-      remoteRes.pipe(res);
-    });
-
-    proxyReq.on('error', (err) => {
-      console.warn('Audio proxy request failed:', err.message);
+      req.on('close', () => {
+        proxyReq.destroy();
+      });
+    } catch (e: any) {
       if (!res.headersSent) {
-        res.status(502).send('Error streaming remote audio');
+        res.status(500).send(e.message || 'Stream proxy error');
       }
-    });
+    }
+  };
 
-    req.on('close', () => {
-      proxyReq.destroy();
-    });
-  } catch (e: any) {
-    if (!res.headersSent) {
-      res.status(500).send(e.message || 'Stream proxy error');
+  streamWithRedirects(targetUrl);
+});
+
+// 4.0 Audius Search Proxy (Fallback if client has CORS or ISP restrictions)
+app.get('/api/audius/search', async (req, res) => {
+  const query = (req.query.q as string || '').trim();
+  const limit = parseInt((req.query.limit as string) || '10', 10);
+
+  if (!query) {
+    return res.json({ tracks: [] });
+  }
+
+  const audiusEndpoints = [
+    'https://api.audius.co/v1',
+    'https://discoveryprovider.audius.co/v1',
+    'https://audius-discovery-1.cultur3stake.com/v1',
+  ];
+
+  for (const endpoint of audiusEndpoints) {
+    try {
+      const url = `${endpoint}/tracks/search?query=${encodeURIComponent(query)}&limit=${limit}&app_name=Sepotify`;
+      const data = await new Promise<any>((resolve, reject) => {
+        const parsed = new URL(url);
+        const mod = parsed.protocol === 'https:' ? https : http;
+        const request = mod.get(url, { headers: { Accept: 'application/json' }, timeout: 6000 }, (r) => {
+          let body = '';
+          r.on('data', (c) => (body += c));
+          r.on('end', () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch (e) {
+              reject(e);
+            }
+          });
+        });
+        request.on('error', reject);
+        request.on('timeout', () => {
+          request.destroy();
+          reject(new Error('Timeout'));
+        });
+      });
+
+      if (data && Array.isArray(data.data)) {
+        const tracks = data.data.map((item: any) => {
+          const id = item.id ? String(item.id) : (item.track_id ? String(item.track_id) : Math.random().toString(36).slice(2));
+          const title = (item.title || 'بدون عنوان').trim();
+          const artist = (item.user?.name || item.user?.handle || 'هنرمند ناشناس').trim();
+          const duration = typeof item.duration === 'number' ? Math.round(item.duration) : 180;
+          const coverUrl =
+            item.artwork?.['480x480'] ||
+            item.artwork?.['150x150'] ||
+            item.artwork?.['1000x1000'] ||
+            'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=480&q=80';
+
+          return {
+            id: `audius-${id}`,
+            audiusId: id,
+            title,
+            artist,
+            album: item.genre || 'Audius Decentralized Music',
+            duration,
+            durationFormatted: `${Math.floor(duration / 60)}:${duration % 60 < 10 ? '0' : ''}${duration % 60}`,
+            coverUrl,
+            audioUrl: `${endpoint}/tracks/${id}/stream?app_name=Sepotify`,
+            downloadUrl: `${endpoint}/tracks/${id}/download?app_name=Sepotify`,
+            genre: item.genre || 'Pop',
+            isAudius: true,
+            isFullSong: true,
+            isStreamable: item.is_streamable !== false && item.access?.stream !== false,
+            isDownloadable: Boolean(item.is_downloadable && item.access?.download !== false),
+            plays: typeof item.play_count === 'number' ? item.play_count : 1000,
+          };
+        });
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        return res.json({ tracks });
+      }
+    } catch {
+      // Try next endpoint
     }
   }
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.json({ tracks: [] });
+});
+
+// 4.01 Audius Download Proxy (Ensures authorized MP3 files can be downloaded even with strict client CORS)
+app.get('/api/audius/download', async (req, res) => {
+  const trackId = (req.query.trackId as string) || '';
+  const urlParam = (req.query.url as string) || '';
+  const targetUrl = urlParam || `https://api.audius.co/v1/tracks/${encodeURIComponent(trackId)}/download?app_name=Sepotify`;
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  const pipeDownload = (downloadUrl: string, hops = 0) => {
+    if (hops > 5) {
+      if (!res.headersSent) res.status(502).send('Too many redirects');
+      return;
+    }
+    try {
+      const parsed = new URL(downloadUrl);
+      const mod = parsed.protocol === 'https:' ? https : http;
+      const proxyReq = mod.get(downloadUrl, { headers: { 'User-Agent': 'Sepotify/1.0', Accept: '*/*' }, timeout: 25000 }, (remoteRes) => {
+        if (remoteRes.statusCode && remoteRes.statusCode >= 300 && remoteRes.statusCode < 400 && remoteRes.headers.location) {
+          const nextUrl = new URL(remoteRes.headers.location, downloadUrl).href;
+          return pipeDownload(nextUrl, hops + 1);
+        }
+
+        if (remoteRes.statusCode && remoteRes.statusCode >= 200 && remoteRes.statusCode < 300) {
+          res.setHeader('Content-Type', remoteRes.headers['content-type'] || 'audio/mpeg');
+          if (remoteRes.headers['content-length']) {
+            res.setHeader('Content-Length', remoteRes.headers['content-length']);
+          }
+          if (remoteRes.headers['content-disposition']) {
+            res.setHeader('Content-Disposition', remoteRes.headers['content-disposition']);
+          }
+          remoteRes.pipe(res);
+        } else {
+          res.status(remoteRes.statusCode || 404).send('Download not available or restricted');
+        }
+      });
+
+      proxyReq.on('error', () => {
+        if (!res.headersSent) res.status(502).send('Error connecting to download server');
+      });
+    } catch (e: any) {
+      if (!res.headersSent) res.status(500).send(e.message || 'Download error');
+    }
+  };
+
+  pipeDownload(targetUrl);
 });
 
 // 4.1 Audio Download Resolver Endpoint (Downloads real MP3 audio for YouTube & all tracks for offline storage)

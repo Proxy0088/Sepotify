@@ -99,7 +99,22 @@ export const TrackRow: React.FC<TrackRowProps> = ({
             >
               {track.title}
             </p>
-            {track.isFullSong && (
+            {track.isAudius && (
+              <span className="bg-purple-600/20 text-purple-300 border border-purple-500/40 text-[9px] px-1.5 py-0.5 rounded shrink-0 font-bold flex items-center gap-0.5">
+                <span>💜 Audius</span>
+              </span>
+            )}
+            {track.isAudius && !track.isDownloadable && (
+              <span className="bg-white/5 text-[#a0a0a0] border border-white/10 text-[8px] px-1 py-0.5 rounded shrink-0">
+                فقط استریم
+              </span>
+            )}
+            {track.isAudius && track.isDownloadable && (
+              <span className="bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[8px] px-1 py-0.5 rounded shrink-0">
+                مجاز برای دانلود
+              </span>
+            )}
+            {track.isFullSong && !track.isAudius && (
               <span className="bg-[#1ed760]/20 text-[#1ed760] border border-[#1ed760]/40 text-[9px] px-1.5 py-0.5 rounded shrink-0 font-bold flex items-center gap-0.5">
                 <span>🎵 آهنگ کامل</span>
               </span>
@@ -109,7 +124,7 @@ export const TrackRow: React.FC<TrackRowProps> = ({
                 پیش‌نمایش
               </span>
             )}
-            {track.isUnblocked && !track.isFullSong && (
+            {track.isUnblocked && !track.isFullSong && !track.isAudius && (
               <span className="bg-[#1ed760]/15 text-[#1ed760] border border-[#1ed760]/30 text-[9px] px-1.5 py-0.5 rounded shrink-0 font-medium flex items-center gap-0.5">
                 <span>⚡ بدون فیلترشکن</span>
               </span>
@@ -137,14 +152,24 @@ export const TrackRow: React.FC<TrackRowProps> = ({
           className={`p-1.5 rounded-full transition-colors ${
             isDownloaded
               ? 'text-[#1ed760] hover:text-red-400'
+              : track.isAudius && !track.isDownloadable
+              ? 'text-white/20 hover:text-amber-400'
               : 'text-white/30 hover:text-white'
           }`}
-          title={isDownloaded ? 'دانلود شده (حذف از آفلاین)' : 'دانلود برای گوش دادن آفلاین'}
+          title={
+            isDownloaded
+              ? 'دانلود شده (حذف از آفلاین)'
+              : track.isAudius && !track.isDownloadable
+              ? 'دانلود توسط هنرمند مجاز نشده است (فقط پخش آنلاین)'
+              : 'دانلود برای گوش دادن آفلاین'
+          }
         >
           {isDownloading ? (
             <Loader2 className="w-4 h-4 animate-spin text-[#1ed760]" />
           ) : isDownloaded ? (
             <Check className="w-4 h-4 text-[#1ed760]" />
+          ) : track.isAudius && !track.isDownloadable ? (
+            <span className="text-[10px] opacity-60">🔒</span>
           ) : (
             <Download className="w-4 h-4" />
           )}

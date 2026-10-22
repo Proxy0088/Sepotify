@@ -21,6 +21,11 @@ export interface Track {
   releaseYear?: number;
   plays?: number;
   isDownloaded?: boolean;
+  audiusId?: string;
+  isAudius?: boolean;
+  isStreamable?: boolean;
+  isDownloadable?: boolean;
+  downloadUrl?: string;
   youtubeId?: string;
   isYouTube?: boolean;
   isDirect?: boolean;

@@ -49,6 +49,7 @@ import {
 } from './services/storage';
 import { audioEngine } from './services/audioEngine';
 import { calculatePersonalizedRecommendations } from './services/recommendation';
+import { searchAudiusTracks } from './services/audius';
 
 import { Sidebar } from './components/Sidebar';
 import { BottomTabBar, TabDestination } from './components/BottomTabBar';
@@ -73,13 +74,16 @@ export default function App() {
   // Search State
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedGenreFilter, setSelectedGenreFilter] = useState<string | null>(null);
+  const [audiusResults, setAudiusResults] = useState<Track[]>([]);
+  const [audiusSearchError, setAudiusSearchError] = useState<string | null>(null);
+  const [audiusUsedNode, setAudiusUsedNode] = useState<string | null>(null);
   const [fullTracks, setFullTracks] = useState<Track[]>([]);
   const [directResults, setDirectResults] = useState<Track[]>([]);
   const [youtubeResults, setYoutubeResults] = useState<Track[]>([]);
   const [deezerResults, setDeezerResults] = useState<Track[]>([]);
   const [previewResults, setPreviewResults] = useState<Track[]>([]);
   const [isSearchingMusic, setIsSearchingMusic] = useState(false);
-  const [activeSourceFilter, setActiveSourceFilter] = useState<'all' | 'full' | 'deezer' | 'direct' | 'youtube'>('all');
+  const [activeSourceFilter, setActiveSourceFilter] = useState<'all' | 'audius' | 'full' | 'deezer' | 'direct' | 'youtube'>('all');
   const [youtubeStatus, setYoutubeStatus] = useState<{ isBlocked: boolean; usedProxy: string | null }>({
     isBlocked: false,
     usedProxy: null,
@@ -130,9 +134,27 @@ export default function App() {
     return [...MOCK_PLAYLISTS, ...customPlaylists];
   }, [customPlaylists]);
 
-  // Downloaded track IDs
+  // Downloaded track IDs (indexes primary ID, audiusId, youtubeId, and prefixes for instant lookup)
   const downloadedIdSet = useMemo(() => {
-    return new Set(downloadedTracks.map((t) => t.id));
+    const s = new Set<string>();
+    for (const t of downloadedTracks) {
+      if (t.id) {
+        s.add(t.id);
+        s.add(t.id.replace(/^audius-/, ''));
+        s.add(`audius-${t.id.replace(/^audius-/, '')}`);
+        s.add(t.id.replace(/^yt-/, ''));
+        s.add(`yt-${t.id.replace(/^yt-/, '')}`);
+      }
+      if (t.audiusId) {
+        s.add(t.audiusId);
+        s.add(`audius-${t.audiusId}`);
+      }
+      if (t.youtubeId) {
+        s.add(t.youtubeId);
+        s.add(`yt-${t.youtubeId}`);
+      }
+    }
+    return s;
   }, [downloadedTracks]);
 
   // Initialize storage & audio engine callbacks
@@ -188,9 +210,14 @@ export default function App() {
     };
   }, []);
 
-  // Unified Multi-Engine Live Search integration
+  // Unified Audius Search integration (debounced with cancellation and race-condition prevention)
+  const searchReqIdRef = useRef(0);
+
   useEffect(() => {
-    if (!searchQuery.trim() || searchQuery.trim().length < 2) {
+    const trimmed = searchQuery.trim();
+    if (!trimmed || trimmed.length < 2) {
+      setAudiusResults([]);
+      setAudiusSearchError(null);
       setFullTracks([]);
       setDirectResults([]);
       setYoutubeResults([]);
@@ -200,27 +227,57 @@ export default function App() {
       return;
     }
 
+    const currentReqId = ++searchReqIdRef.current;
+    const abortCtrl = new AbortController();
+
     const timer = setTimeout(async () => {
       setIsSearchingMusic(true);
+      setAudiusSearchError(null);
+
       try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
-        const data = await res.json();
-        setFullTracks(data.fullTracks || []);
-        setDirectResults(data.directResults || []);
-        setYoutubeResults(data.youtubeResults || []);
-        setDeezerResults(data.deezerResults || []);
-        setPreviewResults(data.previewResults || []);
-        if (data.youtubeStatus) {
-          setYoutubeStatus(data.youtubeStatus);
+        // 1. Primary Search: Audius Official API (Requirement 1)
+        const audiusData = await searchAudiusTracks(trimmed, 12, abortCtrl.signal);
+        if (searchReqIdRef.current === currentReqId) {
+          setAudiusResults(audiusData.tracks);
+          if (audiusData.error) {
+            setAudiusSearchError(audiusData.error);
+          }
+          if (audiusData.usedNode) {
+            setAudiusUsedNode(audiusData.usedNode);
+          }
         }
-      } catch (e) {
-        console.warn('Search request error:', e);
+
+        // 2. Secondary catalog search
+        const res = await fetch(`/api/search?q=${encodeURIComponent(trimmed)}`, {
+          signal: abortCtrl.signal,
+        });
+        if (res.ok && searchReqIdRef.current === currentReqId) {
+          const data = await res.json();
+          setFullTracks(data.fullTracks || []);
+          setDirectResults(data.directResults || []);
+          setYoutubeResults(data.youtubeResults || []);
+          setDeezerResults(data.deezerResults || []);
+          setPreviewResults(data.previewResults || []);
+          if (data.youtubeStatus) {
+            setYoutubeStatus(data.youtubeStatus);
+          }
+        }
+      } catch (e: any) {
+        if (e?.name !== 'AbortError' && searchReqIdRef.current === currentReqId) {
+          console.warn('Search request error:', e);
+          setAudiusSearchError('خطا در برقراری ارتباط با شبکه جهت جستجوی موسیقی');
+        }
       } finally {
-        setIsSearchingMusic(false);
+        if (searchReqIdRef.current === currentReqId) {
+          setIsSearchingMusic(false);
+        }
       }
     }, 350);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      abortCtrl.abort();
+    };
   }, [searchQuery]);
 
   // Navigation history handler
@@ -277,8 +334,13 @@ export default function App() {
     setStats(getStoredStats());
 
     // Check if this track is cached offline in IndexedDB
-    const isDownloadedOffline = downloadedIdSet.has(track.id) || track.isDownloaded;
-    const offlineUrl = await getDownloadedAudioUrl(track.id);
+    const isDownloadedOffline =
+      downloadedIdSet.has(track.id) ||
+      (track.audiusId ? downloadedIdSet.has(track.audiusId) : false) ||
+      (track.youtubeId ? downloadedIdSet.has(track.youtubeId) : false) ||
+      Boolean(track.isDownloaded);
+
+    const offlineUrl = await getDownloadedAudioUrl(track.id, track.audiusId || track.youtubeId);
 
     if (offlineUrl || isDownloadedOffline) {
       // Offline playback: ALWAYS route through HTML5 audioEngine using the local blob
@@ -441,21 +503,28 @@ export default function App() {
     });
   };
 
-  // Offline download handler
+  // Offline download handler (Requirement 3 & 4)
   const handleToggleDownload = async (track: Track) => {
-    const isAlreadyDownloaded = downloadedIdSet.has(track.id);
+    const isAlreadyDownloaded =
+      downloadedIdSet.has(track.id) ||
+      (track.audiusId ? downloadedIdSet.has(track.audiusId) : false) ||
+      (track.youtubeId ? downloadedIdSet.has(track.youtubeId) : false);
+
     if (isAlreadyDownloaded) {
       await removeTrackFromIndexedDB(track.id);
-      setFallbackToast(`آهنگ «${track.title}» از حافظه آفلاین حذف شد.`);
+      setFallbackToast(`آهنگ «${track.title}» از حافظه آفلاین دستگاه حذف شد.`);
       setTimeout(() => setFallbackToast(null), 3500);
     } else {
-      setFallbackToast(`در حال دانلود و ذخیره‌سازی فایل صوتی «${track.title}» برای استفاده آفلاین بدون اینترنت...`);
-      const ok = await downloadTrackToIndexedDB(track);
-      if (ok) {
-        setFallbackToast(`فایل صوتی «${track.title}» با موفقیت دانلود شد و بدون نیاز به اینترنت قابل پخش است.`);
-      } else {
-        setFallbackToast(`خطا در دانلود فایل صوتی «${track.title}».`);
+      // Requirement 3: Check permission before downloading
+      if (track.isAudius && track.isDownloadable === false) {
+        setFallbackToast(`این قطعه توسط هنرمند در Audius برای دانلود مجاز نشده است (فقط امکان پخش آنلاین).`);
+        setTimeout(() => setFallbackToast(null), 5000);
+        return;
       }
+
+      setFallbackToast(`در حال دانلود و ذخیره‌سازی فایل صوتی «${track.title}» برای استفاده آفلاین...`);
+      const result = await downloadTrackToIndexedDB(track);
+      setFallbackToast(result.message);
       setTimeout(() => setFallbackToast(null), 5000);
     }
     const updated = await getDownloadedTracks();
@@ -886,7 +955,18 @@ export default function App() {
                               : 'liquid-glass text-white/60 hover:text-white'
                           }`}
                         >
-                          همه آهنگ‌ها ({fullTracks.length + youtubeResults.length + deezerResults.length + directResults.length})
+                          همه آهنگ‌ها ({audiusResults.length + fullTracks.length + deezerResults.length + directResults.length})
+                        </button>
+                        <button
+                          onClick={() => setActiveSourceFilter('audius')}
+                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full font-semibold transition-all whitespace-nowrap ${
+                            activeSourceFilter === 'audius'
+                              ? 'bg-[#cc0fe0] text-white shadow-md'
+                              : 'liquid-glass text-purple-300 hover:bg-[#cc0fe0]/10 border border-[#cc0fe0]/30'
+                          }`}
+                        >
+                          <span>💜 Audius (استریم و دانلود)</span>
+                          <span className="font-mono text-[11px]">({audiusResults.length})</span>
                         </button>
                         {fullTracks.length > 0 && (
                           <button
@@ -899,19 +979,6 @@ export default function App() {
                           >
                             <span>🎵 آهنگ‌های کامل ۳۲۰kbps</span>
                             <span className="font-mono text-[11px]">({fullTracks.length})</span>
-                          </button>
-                        )}
-                        {youtubeResults.length > 0 && (
-                          <button
-                            onClick={() => setActiveSourceFilter('youtube')}
-                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full font-semibold transition-all whitespace-nowrap ${
-                              activeSourceFilter === 'youtube'
-                                ? 'bg-red-600 text-white shadow-md'
-                                : 'liquid-glass text-red-400 hover:bg-red-600/10 border border-red-500/30'
-                            }`}
-                          >
-                            <span>🔴 یوتیوب (صوتی)</span>
-                            <span className="font-mono text-[11px]">({youtubeResults.length})</span>
                           </button>
                         )}
                         {deezerResults.length > 0 && (
@@ -930,7 +997,71 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Section 1: Real FULL Complete MP3 Songs (Unblocked, 320kbps, Full Length!) */}
+                    {/* Section 1: Official Audius Decentralized Music (Real Streaming & Download) */}
+                    {searchQuery && (activeSourceFilter === 'all' || activeSourceFilter === 'audius') && (
+                      <div className="liquid-glass p-4 rounded-[16px] border border-[#cc0fe0]/40 shadow-xl relative overflow-hidden">
+                        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                          <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span className="p-1 rounded bg-gradient-to-r from-[#cc0fe0] to-[#7e1bcc] text-white font-extrabold text-xs shadow-md">
+                              💜 Audius
+                            </span>
+                            <span>آهنگ‌های Audius (استریم رسمی و دانلود)</span>
+                            {isSearchingMusic && audiusResults.length === 0 && (
+                              <Loader2 className="w-4 h-4 text-purple-400 animate-spin mr-2" />
+                            )}
+                          </h3>
+                          <div className="flex items-center gap-2">
+                            {audiusUsedNode && (
+                              <span className="text-[10px] text-purple-300/80 bg-purple-950/60 border border-purple-800/40 px-2 py-0.5 rounded-full hidden sm:inline font-mono">
+                                سرور: {audiusUsedNode.replace('https://', '')}
+                              </span>
+                            )}
+                            <span className="text-[11px] text-purple-300 font-medium hidden sm:inline">
+                              پخش مستقیم بدون نیاز به هاست
+                            </span>
+                          </div>
+                        </div>
+
+                        {audiusSearchError && (
+                          <div className="mb-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-center gap-2">
+                            <WifiOff className="w-4 h-4 shrink-0 text-amber-400" />
+                            <span>{audiusSearchError}</span>
+                          </div>
+                        )}
+
+                        {audiusResults.length > 0 ? (
+                          <div className="space-y-1.5">
+                            {audiusResults.map((track, i) => (
+                              <TrackRow
+                                key={track.id}
+                                track={track}
+                                index={i}
+                                isCurrent={currentTrack?.id === track.id || currentTrack?.audiusId === track.audiusId}
+                                isPlaying={isPlaying}
+                                isLiked={likedTrackIds.includes(track.id)}
+                                isDownloaded={
+                                  downloadedIdSet.has(track.id) ||
+                                  (track.audiusId ? downloadedIdSet.has(track.audiusId) : false)
+                                }
+                                onPlay={(t) => handlePlayTrack(t, audiusResults)}
+                                onToggleLike={handleToggleLike}
+                                onToggleDownload={handleToggleDownload}
+                              />
+                            ))}
+                          </div>
+                        ) : isSearchingMusic ? (
+                          <div className="py-6 text-center text-[#b3b3b3] text-xs">
+                            در حال جستجو در میان آهنگ‌های شبکه Audius...
+                          </div>
+                        ) : (
+                          <div className="py-4 text-center text-[#b3b3b3] text-xs">
+                            موردی در Audius برای این عبارت پیدا نشد.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Section 2: Real FULL Complete MP3 Songs (Unblocked, 320kbps, Full Length!) */}
                     {searchQuery && (activeSourceFilter === 'all' || activeSourceFilter === 'full') && (
                       <div className="liquid-glass p-4 rounded-[16px] border border-[#1ed760]/40 shadow-xl relative overflow-hidden">
                         <div className="flex items-center justify-between mb-3">

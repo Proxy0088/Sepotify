@@ -93,30 +93,64 @@ class AudioEngine {
     if (!this.audio) return;
 
     try {
-      const offlineUrl = await getDownloadedAudioUrl(track.id);
-      let targetSrc = offlineUrl || track.audioUrl;
+      // Requirement 2: Check if track is streamable
+      if (track.isStreamable === false) {
+        this.callbacks.onError('این قطعه توسط هنرمند در Audius برای پخش آنلاین مجاز نشده است.');
+        return;
+      }
 
-      // If this is a YouTube track and has no offline downloaded blob:
+      // 1. Check if track is cached offline in IndexedDB
+      const offlineUrl = await getDownloadedAudioUrl(track.id, track.audiusId || track.youtubeId);
+      let targetSrc =
+        (track.audioUrl?.startsWith('blob:') ? track.audioUrl : null) ||
+        offlineUrl ||
+        track.audioUrl;
+
+      // 2. If this is an offline local blob, play directly with HTML5 audio
+      if (targetSrc?.startsWith('blob:')) {
+        this.audio.src = targetSrc;
+        this.audio.load();
+        const playPromise = this.audio.play();
+        if (playPromise !== undefined) {
+          await playPromise.catch((err) => {
+            if (err?.name !== 'AbortError') {
+              console.warn('HTML5 offline audio play prevented:', err);
+              this.callbacks.onError('عدم امکان پخش خودکار مرورگر');
+            }
+          });
+        }
+        return;
+      }
+
+      // 3. If YouTube track without offline blob: let YouTube iframe engine handle it
       if (!offlineUrl && (track.youtubeId || targetSrc.includes('youtube.com') || targetSrc.includes('youtu.be'))) {
-        // Let the YouTube engine handle streaming online; do not feed a YouTube web link to HTML5 <audio>
         this.audio.pause();
         return;
       }
 
-      // If remote external MP3 and not cached offline, route through audio proxy for HTTP Range & zero-cutoff streaming
-      if (!offlineUrl && targetSrc.startsWith('http') && !targetSrc.includes('/api/audio/stream')) {
-        targetSrc = `/api/audio/stream?url=${encodeURIComponent(targetSrc)}`;
-      }
-
+      // 4. Remote Audius / MP3 stream:
+      // Try direct stream first; if blocked by browser CORS / network, fallback through audio proxy
       this.audio.src = targetSrc;
       this.audio.load();
 
       const playPromise = this.audio.play();
       if (playPromise !== undefined) {
-        await playPromise.catch((err) => {
+        await playPromise.catch(async (err) => {
           if (err?.name !== 'AbortError') {
-            console.warn('HTML5 Audio play prevented:', err);
-            this.callbacks.onError('عدم امکان پخش خودکار مرورگر');
+            console.warn('HTML5 direct stream error, attempting proxy fallback:', err);
+            if (!targetSrc.includes('/api/audio/stream') && targetSrc.startsWith('http') && this.audio) {
+              try {
+                this.audio.src = `/api/audio/stream?url=${encodeURIComponent(targetSrc)}`;
+                this.audio.load();
+                await this.audio.play();
+              } catch (proxyErr: any) {
+                if (proxyErr?.name !== 'AbortError') {
+                  this.callbacks.onError('عدم امکان پخش استریم آهنگ. وضعیت اینترنت یا VPN خود را بررسی کنید.');
+                }
+              }
+            } else {
+              this.callbacks.onError('عدم امکان پخش خودکار مرورگر');
+            }
           }
         });
       }
